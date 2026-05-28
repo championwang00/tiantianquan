@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chaopi Link Router 设置</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">插件设置</p>
+        <h1>采集配置</h1>
+      </header>
+      <section class="settings-section">
+        <div class="settings-section-head">
+          <p class="eyebrow">本地连接</p>
+          <button id="tokenHelpButton" class="text-button" type="button" aria-expanded="false">如何获取</button>
+        </div>
+        <label class="field">
+          <span>Router Token</span>
+          <input id="routerToken" type="password" placeholder="通常会自动获取">
+        </label>
+        <div id="tokenHelp" class="help-panel" hidden>
+          <ol>
+            <li>一般不用自己填。先打开这个插件，通常会自动填好。</li>
+            <li>如果没有自动填好，先双击项目里的 <code>install.command</code>，等它显示安装完成。</li>
+            <li>再回到这个设置页刷新一下，Router Token 应该会自动出现。</li>
+            <li>还不行的话，打开 <code>server/.env</code>，复制 <code>LOCAL_CLIP_ROUTER_TOKEN=</code> 后面那一长串字符，粘到这里。</li>
+          </ol>
+        </div>
+      </section>
+      <section class="settings-section">
+        <p class="eyebrow">模型配置</p>
+        <label class="field">
+          <span>供应商</span>
+          <select id="llmProvider">
+            <option value="openai">GPT / OpenAI</option>
+            <option value="anthropic">Claude / Anthropic</option>
+            <option value="gemini">Gemini / Google</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="kimi">Kimi / Moonshot</option>
+            <option value="custom">其他 OpenAI-compatible</option>
+          </select>
+        </label>
+        <label id="llmBaseUrlField" class="field">
+          <span>Base URL</span>
+          <input id="llmBaseUrl" type="url" placeholder="填入模型服务地址">
+        </label>
+        <label id="llmModelSelectField" class="field">
+          <span>Model</span>
+          <select id="llmModelSelect"></select>
+        </label>
+        <label id="llmModelTextField" class="field" hidden>
+          <span>Model</span>
+          <input id="llmModel" type="text" placeholder="填入模型名称">
+        </label>
+        <label class="field">
+          <span>API Key</span>
+          <input id="llmApiKey" type="password" placeholder="填入 API Key">
+        </label>
+        <div class="settings-actions">
+          <button id="testModelButton" class="secondary-button" type="button">测试模型连接</button>
+          <span id="modelTestStatus" class="inline-result" aria-live="polite"></span>
+        </div>
+      </section>
+      <section class="settings-section">
+        <p class="eyebrow">Bear</p>
+        <label class="field">
+          <span>Bear 本地笔记路径 / ID</span>
+          <input id="bearNoteId" type="text" placeholder="bear://x-callback-url/open-note?id=... 或直接填 ID">
+        </label>
+      </section>
+      <button id="saveButton" type="button">保存</button>
+      <pre id="status" class="status" aria-live="polite"></pre>
+    </main>
+    <script src="config.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

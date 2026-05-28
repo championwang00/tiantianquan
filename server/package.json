@@ -1,0 +1,14 @@
+{
+  "name": "link-router-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/init-local.js && node --check src/router.js && node --check src/queue.js && node --check src/adapters/eagle.js && node --check src/adapters/bear.js && node --check src/adapters/obsidian.js && node --check src/utils/time.js && node --check src/utils/env.js && node --check src/utils/provider.js && node --check src/utils/webpage.js && node --check src/utils/assets.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
