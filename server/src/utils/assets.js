@@ -13,7 +13,7 @@ export async function saveDataUrlAsset(dataUrl, baseName, ext = "png") {
   if (!buffer.length) return null;
 
   const extension = extensionFromMime(mimeType) || ext;
-  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  const dir = path.join(os.tmpdir(), "tiantianquan-assets");
   await fs.mkdir(dir, { recursive: true });
   const filename = `${safeFileName(baseName)}.${extension}`;
   const filePath = path.join(dir, `${Date.now()}-${filename}`);

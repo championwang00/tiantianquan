@@ -1,12 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 
-APP_NAME="Link Router"
-LABEL="com.link-router.local"
+APP_NAME="甜甜圈"
+LABEL="com.tiantianquan.local"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$ROOT_DIR/server"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG_DIR="$HOME/Library/Logs/LinkRouter"
+LOG_DIR="$HOME/Library/Logs/Tiantianquan"
 
 echo "Installing $APP_NAME..."
 

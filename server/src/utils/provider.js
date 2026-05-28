@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadEnv } from "./env.js";
 
-const DEFAULT_PROVIDER_CONFIG = path.join(os.homedir(), ".config", "link-router", "providers.json");
+const DEFAULT_PROVIDER_CONFIG = path.join(os.homedir(), ".config", "tiantianquan", "providers.json");
 const PROVIDER_TIMEOUT_MS = 12000;
 
 export async function generateClipMetadata(payload, target) {

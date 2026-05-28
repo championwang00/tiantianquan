@@ -720,7 +720,7 @@ function buildAnnotation(payload, metadata) {
   return [
     metadata.summary || buildChineseSummary(payload),
     `保存价值：${metadata.whySaved || "作为网页、产品、设计或内容参考。"}`,
-    "Router 记录：由 Chaopi Link Router 自动入库。"
+    "Router 记录：由甜甜圈自动入库。"
   ].join("\n");
 }
 
@@ -732,7 +732,7 @@ function buildTags(payload, folders, metadata) {
 }
 
 async function saveHtmlSnapshot(html, title) {
-  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  const dir = path.join(os.tmpdir(), "tiantianquan-assets");
   await fs.mkdir(dir, { recursive: true });
   const filename = `${safeShellName(title)}.html`;
   const filePath = path.join(dir, `${Date.now()}-${filename}`);

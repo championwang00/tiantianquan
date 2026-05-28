@@ -9,7 +9,7 @@ import { formatDateInShanghai, nowStampForId } from "./utils/time.js";
 
 const tasks = new Map();
 const taskRoot = process.env.CLIP_ROUTER_TASK_DIR ||
-  path.join(os.homedir(), ".local", "share", "link-router", "tasks");
+  path.join(os.homedir(), ".local", "share", "tiantianquan", "tasks");
 
 const adapters = {
   eagle: runEagleAdapter,

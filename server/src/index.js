@@ -9,5 +9,5 @@ const host = "127.0.0.1";
 const server = http.createServer(createRouter(env));
 
 server.listen(port, host, () => {
-  console.log(`Chaopi Link Router listening at http://${host}:${port}`);
+  console.log(`甜甜圈 listening at http://${host}:${port}`);
 });

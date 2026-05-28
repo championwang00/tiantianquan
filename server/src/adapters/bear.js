@@ -206,7 +206,7 @@ async function openBearUrl(url, timeout) {
     return;
   }
 
-  const urlPath = path.join(os.tmpdir(), "chrome-clip-router-assets", `${Date.now()}-bear-url.txt`);
+  const urlPath = path.join(os.tmpdir(), "tiantianquan-assets", `${Date.now()}-bear-url.txt`);
   await fs.mkdir(path.dirname(urlPath), { recursive: true });
   await fs.writeFile(urlPath, url, "utf8");
   const script = [
@@ -218,7 +218,7 @@ async function openBearUrl(url, timeout) {
 
 async function compactImageForBear(asset) {
   if (!asset?.filePath) return null;
-  const targetPath = path.join(os.tmpdir(), "chrome-clip-router-assets", `${Date.now()}-bear-shot.jpg`);
+  const targetPath = path.join(os.tmpdir(), "tiantianquan-assets", `${Date.now()}-bear-shot.jpg`);
   await execFileAsync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "55", "-Z", "900", asset.filePath, "--out", targetPath], { timeout: 10000 });
   const stat = await fs.stat(targetPath);
   if (stat.size > 280000) return null;
@@ -263,7 +263,7 @@ async function downloadTwitterVideo(url, metadata) {
 }
 
 async function convertVideoToGif(videoPath, metadata) {
-  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  const dir = path.join(os.tmpdir(), "tiantianquan-assets");
   await fs.mkdir(dir, { recursive: true });
   const base = safeShellName(metadata.titleZh || "x-video");
   const palettePath = path.join(dir, `${Date.now()}-${base}-palette.png`);

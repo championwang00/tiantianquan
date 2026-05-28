@@ -232,7 +232,7 @@ function sendAssetPreview(req, res, url, cors) {
 
 function isAllowedPreviewPath(filePath) {
   const tempRoot = path.resolve(os.tmpdir());
-  const assetsRoot = path.resolve(os.tmpdir(), "chrome-clip-router-assets");
+  const assetsRoot = path.resolve(os.tmpdir(), "tiantianquan-assets");
   return filePath.startsWith(`${assetsRoot}${path.sep}`)
     || (filePath.startsWith(`${tempRoot}${path.sep}`) && path.basename(filePath).startsWith("clip-router-eagle-"));
 }

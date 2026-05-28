@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Chaopi Link Router",
-  "description": "Send the current page to Eagle, Bear, and Obsidian from one popup.",
+  "name": "甜甜圈",
+  "description": "本地优先的 Chrome 剪藏分发插件，确认后同步网页素材到 Eagle、Bear 和 Obsidian。",
   "version": "0.1.0",
   "permissions": ["activeTab", "scripting", "contextMenus", "storage", "tabs"],
   "host_permissions": ["http://127.0.0.1:18791/*"],
@@ -16,7 +16,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Chaopi Link Router",
+    "default_title": "甜甜圈",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
