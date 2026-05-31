@@ -8,8 +8,7 @@ import { confirmObsidianWrite, runObsidianAdapter } from "./adapters/obsidian.js
 import { formatDateInShanghai, nowStampForId } from "./utils/time.js";
 
 const tasks = new Map();
-const taskRoot = process.env.CLIP_ROUTER_TASK_DIR ||
-  path.join(os.homedir(), ".local", "share", "tiantianquan", "tasks");
+const taskRoot = path.join(os.homedir(), ".openclaw", "workspace", "clip-router", "tasks");
 
 const adapters = {
   eagle: runEagleAdapter,

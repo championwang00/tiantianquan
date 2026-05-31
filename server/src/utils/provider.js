@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadEnv } from "./env.js";
 
-const DEFAULT_PROVIDER_CONFIG = path.join(os.homedir(), ".config", "tiantianquan", "providers.json");
+const OPENCLAW_CONFIG = path.join(os.homedir(), ".openclaw", "openclaw.json");
 const PROVIDER_TIMEOUT_MS = 12000;
 
 export async function generateClipMetadata(payload, target) {
@@ -85,12 +85,11 @@ async function callConfiguredProvider(prompt) {
     return callProvider(customProvider, prompt);
   }
 
-  const providerConfigPath = env.CLIP_ROUTER_PROVIDER_CONFIG || DEFAULT_PROVIDER_CONFIG;
-  const config = JSON.parse(await fs.readFile(providerConfigPath, "utf8"));
+  const config = JSON.parse(await fs.readFile(OPENCLAW_CONFIG, "utf8"));
   const providers = config?.models?.providers || {};
-  const providerName = env.CLIP_ROUTER_PROVIDER || Object.keys(providers)[0] || "";
-  const provider = providers[providerName];
-  if (!provider) throw new Error(`No provider found in ${providerConfigPath}`);
+  const providerName = env.CLIP_ROUTER_PROVIDER || "deepseek";
+  const provider = providers[providerName] || providers.azure || providers.deepseek || providers["kimi-coding"];
+  if (!provider) throw new Error("No provider found in ~/.openclaw/openclaw.json");
 
   const model = env.CLIP_ROUTER_MODEL || defaultModelForProvider(providerName, provider);
   const apiKey = provider.apiKey || config.env?.[provider.envKey] || config.env?.OPENAI_API_KEY;

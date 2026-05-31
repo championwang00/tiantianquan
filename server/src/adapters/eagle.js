@@ -194,6 +194,11 @@ async function buildImportCandidates(payload, metadata) {
     }
   }
 
+  if (sourceType === "xiaohongshu") {
+    const imageCandidates = buildXiaohongshuImageCandidates(payload, sourceType);
+    candidates.push(...imageCandidates);
+  }
+
   if (payload.screenshotDataUrl) {
     const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "eagle-screenshot", "png");
     if (screenshot?.filePath) {
@@ -253,8 +258,52 @@ function detectSourceType(url) {
   if (host === "x.com" || host === "twitter.com" || host.endsWith(".x.com") || host.endsWith(".twitter.com")) {
     return "twitter";
   }
+  if (host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com")) return "xiaohongshu";
   if (host.includes("dribbble") || host.includes("behance")) return "portfolio";
   return "webpage";
+}
+
+function buildXiaohongshuImageCandidates(payload, sourceType) {
+  const seen = new Set();
+  const images = [
+    payload.pageMeta?.image ? { src: payload.pageMeta.image, alt: "小红书封面图", width: 0, height: 0 } : null,
+    ...(payload.pageAssets?.images || [])
+  ].filter(Boolean);
+
+  return images
+    .map((image, index) => {
+      const src = normalizeXiaohongshuImageUrl(image.src || "");
+      if (!src || seen.has(src)) return null;
+      seen.add(src);
+      return makeCandidate({
+        kind: "asset-url",
+        sourceType,
+        assetUrl: src,
+        selected: index === 0,
+        label: image.alt || `小红书图片 ${index + 1}`,
+        id: `xiaohongshu-image:${index + 1}:${safeShellName(src)}`,
+        width: image.width || 0,
+        height: image.height || 0
+      });
+    })
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function normalizeXiaohongshuImageUrl(url) {
+  const text = String(url || "").trim();
+  if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
+  try {
+    const parsed = new URL(text);
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (["imageView2", "format", "x-oss-process"].includes(key) || key.startsWith("image")) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return text;
+  }
 }
 
 async function downloadTwitterMedia(url, metadata) {
@@ -364,6 +413,8 @@ function summarizeImportPlan(importPlan) {
     filePath: importPlan.asset?.filePath || "",
     size: importPlan.asset?.size || 0,
     assetUrl: importPlan.assetUrl || "",
+    width: importPlan.width || 0,
+    height: importPlan.height || 0,
     reason: importPlan.reason || ""
   };
 }
@@ -408,6 +459,7 @@ function importPlanLabel(importPlan) {
   if (importPlan.kind === "media-file") return `媒体文件 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "screenshot") return `当前可见区域截图 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "html-snapshot") return `网页快照 ${importPlan.asset?.filename || ""}`.trim();
+  if (importPlan.kind === "asset-url" && importPlan.sourceType === "xiaohongshu") return `小红书图片 ${importPlan.assetUrl || ""}`.trim();
   if (importPlan.kind === "asset-url") return `页面首图 ${importPlan.assetUrl || ""}`.trim();
   return "网页 URL 元数据";
 }
@@ -720,7 +772,7 @@ function buildAnnotation(payload, metadata) {
   return [
     metadata.summary || buildChineseSummary(payload),
     `保存价值：${metadata.whySaved || "作为网页、产品、设计或内容参考。"}`,
-    "Router 记录：由甜甜圈自动入库。"
+    "Router 记录：由 Chaopi Link Router 自动入库。"
   ].join("\n");
 }
 
@@ -732,7 +784,7 @@ function buildTags(payload, folders, metadata) {
 }
 
 async function saveHtmlSnapshot(html, title) {
-  const dir = path.join(os.tmpdir(), "tiantianquan-assets");
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
   await fs.mkdir(dir, { recursive: true });
   const filename = `${safeShellName(title)}.html`;
   const filePath = path.join(dir, `${Date.now()}-${filename}`);

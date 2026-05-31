@@ -9,7 +9,7 @@ import { hostnameFromUrl } from "../utils/webpage.js";
 import { loadEnv } from "../utils/env.js";
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_BEAR_NOTE_ID = "39D4DACD-6747-4633-88A8-3C042C4A948D";
+const DEFAULT_BEAR_NOTE_ID = "";
 const BEAR_DB_CANDIDATES = [
   path.join(os.homedir(), "Library", "Group Containers", "9K33E3U3T4.net.shinyfrog.bear", "Application Data", "database.sqlite"),
   path.join(os.homedir(), "Library", "Group Containers", "9K33E3U3T4.net.shinyfrog.bear", "Application Data", "Bear.sqlite"),
@@ -206,7 +206,7 @@ async function openBearUrl(url, timeout) {
     return;
   }
 
-  const urlPath = path.join(os.tmpdir(), "tiantianquan-assets", `${Date.now()}-bear-url.txt`);
+  const urlPath = path.join(os.tmpdir(), "chrome-clip-router-assets", `${Date.now()}-bear-url.txt`);
   await fs.mkdir(path.dirname(urlPath), { recursive: true });
   await fs.writeFile(urlPath, url, "utf8");
   const script = [
@@ -218,7 +218,7 @@ async function openBearUrl(url, timeout) {
 
 async function compactImageForBear(asset) {
   if (!asset?.filePath) return null;
-  const targetPath = path.join(os.tmpdir(), "tiantianquan-assets", `${Date.now()}-bear-shot.jpg`);
+  const targetPath = path.join(os.tmpdir(), "chrome-clip-router-assets", `${Date.now()}-bear-shot.jpg`);
   await execFileAsync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "55", "-Z", "900", asset.filePath, "--out", targetPath], { timeout: 10000 });
   const stat = await fs.stat(targetPath);
   if (stat.size > 280000) return null;
@@ -263,7 +263,7 @@ async function downloadTwitterVideo(url, metadata) {
 }
 
 async function convertVideoToGif(videoPath, metadata) {
-  const dir = path.join(os.tmpdir(), "tiantianquan-assets");
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
   await fs.mkdir(dir, { recursive: true });
   const base = safeShellName(metadata.titleZh || "x-video");
   const palettePath = path.join(dir, `${Date.now()}-${base}-palette.png`);
@@ -353,7 +353,11 @@ async function readBearNoteText() {
 
 function getBearNoteId() {
   const env = loadEnv();
-  return normalizeBearNoteId(env.CLIP_ROUTER_BEAR_NOTE_ID) || DEFAULT_BEAR_NOTE_ID;
+  const noteId = normalizeBearNoteId(env.CLIP_ROUTER_BEAR_NOTE_ID) || DEFAULT_BEAR_NOTE_ID;
+  if (!noteId) {
+    throw new Error("请先在插件设置里填写 Bear 笔记链接");
+  }
+  return noteId;
 }
 
 function normalizeBearNoteId(value) {

@@ -265,15 +265,7 @@ async function collectPageContext(tab) {
         const text = (article?.innerText || document.body.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 60000);
         const markdown = nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000);
         const htmlSnapshot = `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000);
-        const images = [...document.images]
-          .map((image) => ({
-            src: image.currentSrc || image.src,
-            alt: image.alt || "",
-            width: image.naturalWidth || image.width || 0,
-            height: image.naturalHeight || image.height || 0
-          }))
-          .filter((image) => image.src && image.width >= 240 && image.height >= 160)
-          .slice(0, 12);
+        const images = collectImages().slice(0, 20);
         return {
           meta: {
             description: metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
@@ -301,6 +293,60 @@ async function collectPageContext(tab) {
           const paragraphCount = node.querySelectorAll("p, li, blockquote, pre, h1, h2, h3").length;
           const imageCount = node.querySelectorAll("img").length;
           return textLength + paragraphCount * 180 + imageCount * 80;
+        }
+
+        function collectImages() {
+          const seen = new Set();
+          const items = [];
+          const push = (src, alt = "", width = 0, height = 0) => {
+            const normalized = absolutize(src);
+            if (!normalized || seen.has(normalized)) return;
+            if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
+            seen.add(normalized);
+            items.push({ src: normalized, alt, width, height });
+          };
+
+          for (const image of [...document.images]) {
+            const srcset = image.getAttribute("srcset") || image.getAttribute("data-srcset") || "";
+            const fromSrcset = pickLargestSrcset(srcset);
+            push(
+              fromSrcset || image.currentSrc || image.getAttribute("data-src") || image.getAttribute("data-original") || image.src,
+              image.alt || "",
+              image.naturalWidth || image.width || 0,
+              image.naturalHeight || image.height || 0
+            );
+          }
+
+          for (const node of [...document.querySelectorAll("[style]")]) {
+            const match = String(node.getAttribute("style") || "").match(/url\\((['"]?)(.*?)\\1\\)/);
+            if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0);
+          }
+
+          return items
+            .filter((image) => image.width >= 180 || image.height >= 180 || /xiaohongshu|xhscdn|sns-webpic|sns-img/i.test(image.src))
+            .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+        }
+
+        function pickLargestSrcset(srcset) {
+          if (!srcset) return "";
+          return srcset
+            .split(",")
+            .map((part) => {
+              const [src, size] = part.trim().split(/\s+/);
+              const weight = Number(String(size || "").replace(/[^\d.]/g, "")) || 0;
+              return { src, weight };
+            })
+            .filter((item) => item.src)
+            .sort((a, b) => b.weight - a.weight)[0]?.src || "";
+        }
+
+        function absolutize(src) {
+          if (!src) return "";
+          try {
+            return new URL(src, location.href).toString();
+          } catch (_error) {
+            return src;
+          }
         }
 
         function nodeToMarkdown(root) {
@@ -797,6 +843,14 @@ function renderCandidate(candidate) {
   body.append(title, meta);
 
   label.append(checkbox, body);
+  label.append(renderCandidatePreview(candidate));
+  return label;
+}
+
+function renderCandidatePreview(candidate) {
+  const wrap = document.createElement("span");
+  wrap.className = `candidate-preview candidate-preview-${candidate.kind || "unknown"}`;
+
   if (candidate.kind === "media-file" && candidate.filePath) {
     const video = document.createElement("video");
     video.className = "candidate-video";
@@ -805,9 +859,39 @@ function renderCandidate(candidate) {
     video.playsInline = true;
     video.preload = "metadata";
     video.src = buildPreviewAssetUrl(candidate.filePath);
-    label.append(video);
+    wrap.append(video);
+    return wrap;
   }
-  return label;
+
+  if (candidate.kind === "screenshot" && candidate.filePath) {
+    const image = document.createElement("img");
+    image.className = "candidate-image";
+    image.alt = candidate.filename || "当前截图预览";
+    image.src = buildPreviewAssetUrl(candidate.filePath);
+    wrap.append(image);
+    return wrap;
+  }
+
+  if (candidate.kind === "asset-url" && candidate.assetUrl) {
+    const image = document.createElement("img");
+    image.className = "candidate-image";
+    image.alt = "页面首图预览";
+    image.src = candidate.assetUrl;
+    image.referrerPolicy = "no-referrer";
+    wrap.append(image);
+    return wrap;
+  }
+
+  const icon = document.createElement("span");
+  icon.className = "candidate-preview-icon";
+  icon.textContent = candidate.kind === "html-snapshot" ? "HTML" : "URL";
+  const text = document.createElement("span");
+  text.className = "candidate-preview-text";
+  text.textContent = candidate.kind === "html-snapshot"
+    ? "保存网页离线快照"
+    : "保存网页链接和元数据";
+  wrap.append(icon, text);
+  return wrap;
 }
 
 function candidateTitle(candidate) {

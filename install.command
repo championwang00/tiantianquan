@@ -1,12 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 
-APP_NAME="甜甜圈"
-LABEL="com.tiantianquan.local"
+APP_NAME="Chaopi Link Router"
+LABEL="com.chaopi.link-router"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$ROOT_DIR/server"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG_DIR="$HOME/Library/Logs/Tiantianquan"
+LOG_DIR="$HOME/Library/Logs/ChaopiLinkRouter"
 
 echo "Installing $APP_NAME..."
 
