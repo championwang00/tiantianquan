@@ -8,6 +8,9 @@ const confirmingTargets = new Set();
 const successResetTimers = new Map();
 let eagleFolderMenuOpen = false;
 let eagleFolderMenuQuery = "";
+let lastScrollTop = 0;
+let restoringScroll = false;
+let trackedScroller = null;
 
 const CHANNELS = {
   eagle: { label: "Eagle", confirm: (taskId) => confirmEagle(taskId, getEagleFolderIds(), getEagleCandidateIds()) },
@@ -27,6 +30,7 @@ init();
 
 async function init() {
   bindStaticActions();
+  trackScrollPosition();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeTab = tab;
   elements.title.textContent = tab?.title || "未读取到标题";
@@ -58,6 +62,7 @@ async function init() {
 function bindStaticActions() {
   document.querySelector("#settingsButton")?.addEventListener("click", openSettings);
   document.querySelector("#footerSettingsButton")?.addEventListener("click", openSettings);
+  document.addEventListener("pointerdown", closeEagleFolderMenuOnOutsidePointer, true);
 }
 
 async function openSettings() {
@@ -107,9 +112,11 @@ function setOnlyOpen(target) {
 }
 
 function setCardOpen(target, open) {
-  const card = getCard(target);
-  card.classList.toggle("is-open", open);
-  card.querySelector(".channel-summary").setAttribute("aria-expanded", String(open));
+  withScrollPreserved(() => {
+    const card = getCard(target);
+    card.classList.toggle("is-open", open);
+    card.querySelector(".channel-summary").setAttribute("aria-expanded", String(open));
+  });
 }
 
 async function prepareOpenTargets() {
@@ -167,7 +174,7 @@ async function confirmChannel(target) {
   const taskState = currentTasks[target];
   if (confirmingTargets.has(target)) return;
   const targetStatus = taskState?.results?.[target]?.status;
-  if (!["needs_review", "success", "exists"].includes(targetStatus)) return;
+  if (!["needs_review", "success", "exists", "failed"].includes(targetStatus)) return;
   clearSuccessReset(target);
 
   confirmingTargets.add(target);
@@ -184,6 +191,10 @@ async function confirmChannel(target) {
   } catch (error) {
     setShellState("error");
     setCardStatus(target, "失败");
+    if (currentTasks[target]?.results?.[target]) {
+      currentTasks[target].results[target].status = "failed";
+      currentTasks[target].results[target].reason = error.message;
+    }
     setCardInlineState(target, `${CHANNELS[target].label} 写入失败：${error.message}`);
     setCardConfirmState(target);
   } finally {
@@ -266,6 +277,7 @@ async function collectPageContext(tab) {
         const markdown = nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000);
         const htmlSnapshot = `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000);
         const images = collectImages().slice(0, 20);
+        const videos = collectVideos().slice(0, 10);
         return {
           meta: {
             description: metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
@@ -275,7 +287,7 @@ async function collectPageContext(tab) {
             canonical: attr('link[rel="canonical"]', "href"),
             published: metaContent('meta[property="article:published_time"]') || metaContent('meta[name="article:published_time"]')
           },
-          assets: { images },
+          assets: { images, videos },
           content: { text, markdown, htmlSnapshot }
         };
 
@@ -325,6 +337,73 @@ async function collectPageContext(tab) {
           return items
             .filter((image) => image.width >= 180 || image.height >= 180 || /xiaohongshu|xhscdn|sns-webpic|sns-img/i.test(image.src))
             .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+        }
+
+        function collectVideos() {
+          const seen = new Set();
+          const items = [];
+          const push = (src, label = "", poster = "") => {
+            const normalized = absolutize(cleanEscapedUrl(src));
+            if (!normalized || seen.has(normalized)) return;
+            if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
+            if (!isLikelyVideoUrl(normalized)) return;
+            seen.add(normalized);
+            items.push({ src: normalized, label, poster: absolutize(poster || "") });
+          };
+
+          for (const video of [...document.querySelectorAll("video")]) {
+            push(video.currentSrc || video.src, video.getAttribute("aria-label") || video.title || "页面视频", video.poster || "");
+            for (const source of [...video.querySelectorAll("source")]) {
+              push(source.src || source.getAttribute("src"), source.type || "页面视频", video.poster || "");
+            }
+          }
+
+          for (const selector of [
+            'meta[property="og:video"]',
+            'meta[property="og:video:url"]',
+            'meta[property="og:video:secure_url"]',
+            'meta[name="og:video"]',
+            'meta[name="og:video:url"]',
+            'meta[name="og:video:secure_url"]',
+            'meta[name="twitter:player:stream"]',
+            'meta[name="twitter:player"]'
+          ]) {
+            const value = metaContent(selector);
+            push(value, "页面视频", metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]'));
+          }
+
+          const scriptText = [...document.scripts]
+            .map((script) => script.textContent || "")
+            .filter((text) => /mp4|m3u8|video|stream/i.test(text))
+            .join("\n")
+            .slice(0, 800000);
+          for (const url of extractVideoUrls(scriptText)) push(url, "页面视频");
+
+          return items;
+        }
+
+        function extractVideoUrls(text) {
+          const urls = new Set();
+          const directPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?(?:\.mp4|\.m3u8)(?:\?[^"'\\\s<>]*)?/gi;
+          for (const match of text.matchAll(directPattern)) urls.add(match[0]);
+          const escapedPattern = /https?:\\\\\/\\\\\/[^"'\\\s<>]+?(?:\.mp4|\.m3u8)(?:\\[^"'\\\s<>]*)?/gi;
+          for (const match of text.matchAll(escapedPattern)) urls.add(match[0]);
+          return [...urls].map(cleanEscapedUrl);
+        }
+
+        function cleanEscapedUrl(value) {
+          return String(value || "")
+            .replace(/\\u002F/g, "/")
+            .replace(/\\\//g, "/")
+            .replace(/&amp;/g, "&")
+            .replace(/\\u0026/g, "&")
+            .replace(/\\u003D/g, "=")
+            .replace(/\\u003F/g, "?");
+        }
+
+        function isLikelyVideoUrl(url) {
+          return /\.(mp4|m4v|mov|webm|m3u8)(?:[?#]|$)/i.test(url)
+            || /video|stream|m3u8|mp4|sns-video|xhscdn/i.test(url);
         }
 
         function pickLargestSrcset(srcset) {
@@ -524,12 +603,14 @@ function getCard(target) {
 }
 
 function setCardPreview(target, message) {
-  const preview = getCard(target).querySelector('[data-role="preview"]');
-  if (Array.isArray(message)) {
-    preview.replaceChildren(...message.filter((field) => field.kind !== "candidate-list").map((field) => renderField(field, target)));
-    return;
-  }
-  preview.textContent = message || "没有可展示的预览。";
+  withScrollPreserved(() => {
+    const preview = getCard(target).querySelector('[data-role="preview"]');
+    if (Array.isArray(message)) {
+      preview.replaceChildren(...message.filter((field) => field.kind !== "candidate-list").map((field) => renderField(field, target)));
+      return;
+    }
+    preview.textContent = message || "没有可展示的预览。";
+  });
 }
 
 function renderField(field, target = "") {
@@ -583,6 +664,20 @@ function renderField(field, target = "") {
     caption.className = "preview-caption";
     caption.textContent = [field.value, formatBytes(field.size)].filter(Boolean).join(" · ");
     value.append(caption);
+  } else if (field.kind === "remote-video" && field.src) {
+    const video = document.createElement("video");
+    video.className = "preview-video";
+    video.controls = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.src = field.src;
+    if (field.poster) video.poster = field.poster;
+    value.append(video);
+    const caption = document.createElement("span");
+    caption.className = "preview-caption";
+    caption.textContent = field.value || field.src;
+    value.append(caption);
   } else if (field.kind === "candidate-list" && Array.isArray(field.value)) {
     value.className += " candidate-list";
     for (const candidate of field.value) {
@@ -628,7 +723,8 @@ function setCardConfirmState(target) {
   const status = currentTasks[target]?.results?.[target]?.status || "";
   const isConfirming = confirmingTargets.has(target);
   const isPreparing = status === "running" || status === "queued";
-  button.disabled = isConfirming || !["needs_review", "success", "exists"].includes(status);
+  const canConfirm = ["needs_review", "success", "exists", "failed"].includes(status);
+  button.disabled = isConfirming || isPreparing || !canConfirm;
   button.classList.toggle("is-loading", isPreparing || isConfirming);
   button.setAttribute("aria-busy", String(isPreparing || isConfirming));
   if (isConfirming) {
@@ -638,11 +734,11 @@ function setCardConfirmState(target) {
   } else if (status === "needs_review") {
     button.textContent = "确认收录";
   } else if (status === "success") {
-    button.textContent = "已收录";
+    button.textContent = "再次收录";
   } else if (status === "exists") {
-    button.textContent = "已收录";
+    button.textContent = "再次收录";
   } else if (status === "failed") {
-    button.textContent = "写入失败";
+    button.textContent = "重试收录";
   } else {
     button.textContent = "展开后生成预览";
   }
@@ -680,17 +776,19 @@ function syncEagleCandidatesFromResult(result) {
 function renderEagleCandidates(result) {
   const panel = getCard("eagle").querySelector('[data-role="candidates"]');
   if (!panel) return;
-  const list = panel.querySelector(".candidate-list");
-  const candidates = result.candidates || result.previewFields?.find((field) => field.kind === "candidate-list")?.value || [];
-  if (!candidates.length) {
-    list.className = "candidate-list candidate-list-empty";
-    list.textContent = result.status === "running" || result.status === "queued"
-      ? "正在生成可收录素材..."
-      : "没有识别到可单独收录的素材。";
-    return;
-  }
-  list.className = "candidate-list";
-  list.replaceChildren(...candidates.map(renderCandidate));
+  withScrollPreserved(() => {
+    const list = panel.querySelector(".candidate-list");
+    const candidates = result.candidates || result.previewFields?.find((field) => field.kind === "candidate-list")?.value || [];
+    if (!candidates.length) {
+      list.className = "candidate-list candidate-list-empty";
+      list.textContent = result.status === "running" || result.status === "queued"
+        ? "正在生成可收录素材..."
+        : "没有识别到可单独收录的素材。";
+      return;
+    }
+    list.className = "candidate-list";
+    list.replaceChildren(...candidates.map(renderCandidate));
+  });
 }
 
 function syncEagleFolderFromResult(result) {
@@ -704,6 +802,7 @@ function syncEagleFolderFromResult(result) {
 
 function renderEagleFolderEditor() {
   const wrap = el("div", "folder-editor", "");
+  wrap.dataset.role = "eagle-folder-editor";
   const selectedFolders = selectedEagleFolderIds
     .map((id) => eagleFolders.find((folder) => folder.id === id))
     .filter(Boolean);
@@ -737,7 +836,7 @@ function renderEagleFolderEditor() {
     wrap.append(renderEagleFolderMenu());
     requestAnimationFrame(() => {
       const input = document.querySelector("#eagleFolderMenuSearch");
-      if (input) input.focus();
+      if (input) input.focus({ preventScroll: true });
     });
   }
 
@@ -786,8 +885,6 @@ function renderEagleFolderMenu() {
         } else {
           selectedEagleFolderIds = [...selectedEagleFolderIds, folder.id];
         }
-        eagleFolderMenuOpen = false;
-        eagleFolderMenuQuery = "";
         persistCurrentOptions();
         rerenderEaglePreview();
       });
@@ -801,6 +898,15 @@ function renderEagleFolderMenu() {
 function rerenderEaglePreview() {
   const fields = currentTasks.eagle?.results?.eagle?.previewFields;
   if (fields) setCardPreview("eagle", fields);
+}
+
+function closeEagleFolderMenuOnOutsidePointer(event) {
+  if (!eagleFolderMenuOpen) return;
+  const editor = event.target?.closest?.('[data-role="eagle-folder-editor"]');
+  if (editor) return;
+  eagleFolderMenuOpen = false;
+  eagleFolderMenuQuery = "";
+  rerenderEaglePreview();
 }
 
 function el(tag, className, text) {
@@ -825,6 +931,7 @@ function renderCandidate(candidate) {
   checkbox.type = "checkbox";
   checkbox.checked = checked;
   checkbox.addEventListener("change", () => {
+    rememberScroll();
     if (checkbox.checked) {
       selectedEagleCandidateIds = [...new Set([...selectedEagleCandidateIds, candidate.id])];
     } else {
@@ -863,6 +970,19 @@ function renderCandidatePreview(candidate) {
     return wrap;
   }
 
+  if (candidate.kind === "media-url" && candidate.mediaUrl) {
+    const video = document.createElement("video");
+    video.className = "candidate-video";
+    video.controls = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.src = candidate.mediaUrl;
+    if (candidate.poster) video.poster = candidate.poster;
+    wrap.append(video);
+    return wrap;
+  }
+
   if (candidate.kind === "screenshot" && candidate.filePath) {
     const image = document.createElement("img");
     image.className = "candidate-image";
@@ -897,6 +1017,7 @@ function renderCandidatePreview(candidate) {
 function candidateTitle(candidate) {
   const names = {
     "media-file": "X 视频",
+    "media-url": "页面视频",
     screenshot: "当前截图",
     "html-snapshot": "HTML 快照",
     "asset-url": "页面首图",
@@ -915,6 +1036,88 @@ function setStatus(message) {
 
 function setShellState(state) {
   elements.shell.dataset.state = state;
+}
+
+function trackScrollPosition() {
+  trackedScroller = getScrollContainer();
+  lastScrollTop = getCurrentScrollTop();
+  const update = () => {
+    if (restoringScroll) return;
+    lastScrollTop = getCurrentScrollTop();
+  };
+
+  for (const scroller of getScrollableCandidates()) {
+    scroller.addEventListener("scroll", update, { passive: true });
+  }
+  window.addEventListener("scroll", update, { passive: true });
+
+  document.addEventListener("pointerdown", rememberScroll, true);
+  document.addEventListener("keydown", rememberScroll, true);
+  document.addEventListener("input", rememberScroll, true);
+  document.addEventListener("change", rememberScroll, true);
+}
+
+function rememberScroll() {
+  lastScrollTop = getCurrentScrollTop();
+}
+
+function withScrollPreserved(callback) {
+  const before = getCurrentScrollTop() || lastScrollTop || 0;
+  const result = callback();
+  restoreScroll(before);
+  return result;
+}
+
+function restoreScroll(value = lastScrollTop) {
+  const top = Math.max(0, Number(value || 0));
+  restoringScroll = true;
+  const apply = () => {
+    const scroller = getScrollContainer();
+    document.body.scrollTop = top;
+    document.documentElement.scrollTop = top;
+    if (scroller) scroller.scrollTop = top;
+    window.scrollTo(0, top);
+  };
+  apply();
+  requestAnimationFrame(() => {
+    apply();
+    requestAnimationFrame(() => {
+      apply();
+      lastScrollTop = top;
+      restoringScroll = false;
+    });
+  });
+}
+
+function getCurrentScrollTop() {
+  const scroller = getScrollContainer();
+  return scroller?.scrollTop || document.body.scrollTop || document.documentElement.scrollTop || window.scrollY || 0;
+}
+
+function getScrollContainer() {
+  const candidates = getScrollableCandidates();
+  const active = candidates.find((node) => node.scrollTop > 0);
+  if (active) {
+    trackedScroller = active;
+    return active;
+  }
+  if (trackedScroller && canScroll(trackedScroller)) return trackedScroller;
+  const scrollable = candidates.find(canScroll);
+  trackedScroller = scrollable || document.scrollingElement || document.documentElement;
+  return trackedScroller;
+}
+
+function getScrollableCandidates() {
+  return [
+    document.body,
+    document.documentElement,
+    document.scrollingElement,
+    elements.shell
+  ].filter(Boolean);
+}
+
+function canScroll(node) {
+  return Number(node.scrollHeight || 0) > Number(node.clientHeight || 0) + 1;
 }
 
 function buildPreviewAssetUrl(filePath) {

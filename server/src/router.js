@@ -296,7 +296,8 @@ function sanitizeObject(value) {
 function sanitizePageAssets(value) {
   const assets = sanitizeObject(value);
   return {
-    images: Array.isArray(assets.images) ? assets.images.slice(0, 20) : []
+    images: Array.isArray(assets.images) ? assets.images.slice(0, 20) : [],
+    videos: Array.isArray(assets.videos) ? assets.videos.slice(0, 10) : []
   };
 }
 

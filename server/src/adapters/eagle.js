@@ -88,38 +88,39 @@ export async function confirmEagleWrite(task, options = {}) {
   const beforeIds = await listItemIds();
   const writtenItems = [];
   let activeBeforeIds = beforeIds;
+  const primaryFolder = folders[0];
 
   for (const candidate of candidates) {
-    for (const folder of folders) {
-      const response = await importToEagle(candidate, task.payload, metadata, [folder], annotation);
-      const item = await resolveImportedItem(response, activeBeforeIds, task.payload, candidate, metadata, [folder]);
-      const itemId = item?.id || "";
-      if (!itemId) {
-        throw new Error(`Eagle ${importPlanLabel(candidate)} 导入后未能验证到对应条目。`);
-      }
-
-      const freshItem = await waitForItemInfo(itemId);
-      if (candidate.kind === "media-file" && freshItem?.ext && !isExpectedMediaItem(freshItem, candidate, task.payload)) {
-        throw new Error(`Eagle 视频导入格式不匹配：期望 mp4 媒体文件，但验证到 ${freshItem.ext || "未知格式"}。`);
-      }
-
-      const verification = await verifyItem(itemId, task.payload, [folder], freshItem);
-      if (!verification.folderOk) {
-        throw new Error(`Eagle 已导入但未进入目标文件夹「${folder.name}」。itemId=${itemId}，实际文件夹：${verification.rawFolderNames.join("、") || verification.rawFolderIds.join("、") || "未知"}。`);
-      }
-
-      const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, [folder], annotation);
-      writtenItems.push({
-        candidateId: candidate.id,
-        itemId,
-        folderId: folder.id,
-        folderName: folder.name,
-        importPlan: summarizeImportPlan(candidate),
-        verification,
-        metadataUpdate
-      });
-      activeBeforeIds = new Set([...activeBeforeIds, itemId]);
+    const response = await importToEagle(candidate, task.payload, metadata, folders, annotation);
+    const item = await resolveImportedItem(response, activeBeforeIds, task.payload, candidate, metadata, folders);
+    const itemId = item?.id || "";
+    if (!itemId) {
+      throw new Error(`Eagle ${importPlanLabel(candidate)} 导入后未能验证到对应条目。`);
     }
+
+    const freshItem = await waitForItemInfo(itemId);
+    if (candidate.kind === "media-file" && freshItem?.ext && !isExpectedMediaItem(freshItem, candidate, task.payload)) {
+      throw new Error(`Eagle 视频导入格式不匹配：期望 mp4 媒体文件，但验证到 ${freshItem.ext || "未知格式"}。`);
+    }
+
+    const verification = await verifyItem(itemId, task.payload, folders, freshItem);
+    if (!verification.folderOk && primaryFolder) {
+      throw new Error(`Eagle 已导入但未进入目标文件夹「${primaryFolder.name}」。itemId=${itemId}，实际文件夹：${verification.rawFolderNames.join("、") || verification.rawFolderIds.join("、") || "未知"}。`);
+    }
+
+    const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, folders, annotation);
+    writtenItems.push({
+      candidateId: candidate.id,
+      itemId,
+      folderId: primaryFolder?.id || "",
+      folderName: primaryFolder?.name || "",
+      requestedFolderIds: folders.map((folder) => folder.id),
+      requestedFolderNames: folders.map((folder) => folder.name),
+      importPlan: summarizeImportPlan(candidate),
+      verification,
+      metadataUpdate
+    });
+    activeBeforeIds = new Set([...activeBeforeIds, itemId]);
   }
 
   await revealEagle();
@@ -195,6 +196,8 @@ async function buildImportCandidates(payload, metadata) {
   }
 
   if (sourceType === "xiaohongshu") {
+    const videoCandidates = buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书视频" });
+    candidates.push(...videoCandidates);
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
     candidates.push(...imageCandidates);
   } else {
@@ -293,6 +296,37 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
     .slice(0, 8);
 }
 
+function buildContentVideoCandidates(payload, sourceType, options = {}) {
+  const seen = new Set();
+  return (payload.pageAssets?.videos || [])
+    .map((video, index) => {
+      const src = normalizeContentVideoUrl(video.src || "");
+      if (!src || seen.has(src)) return null;
+      seen.add(src);
+      return makeCandidate({
+        kind: "media-url",
+        sourceType,
+        mediaUrl: src,
+        poster: video.poster || "",
+        selected: Boolean(options.selectedFirst && index === 0),
+        label: video.label || `${options.labelPrefix || "内容视频"} ${index + 1}`,
+        id: `content-video:${index + 1}:${safeShellName(src)}`
+      });
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function normalizeContentVideoUrl(url) {
+  const text = String(url || "").trim();
+  if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
+  try {
+    return new URL(text).toString();
+  } catch (_error) {
+    return text;
+  }
+}
+
 function normalizeContentImageUrl(url, sourceType) {
   const text = String(url || "").trim();
   if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
@@ -336,14 +370,105 @@ async function downloadTwitterMedia(url, metadata) {
   };
 }
 
+async function downloadMediaUrl(mediaUrl, metadata, sourceType = "media") {
+  const outputTemplate = path.join(os.tmpdir(), `clip-router-eagle-${Date.now()}-${safeShellName(metadata.titleZh || `${sourceType}-media`)}.%(ext)s`);
+  const args = [
+    "--no-playlist",
+    "--merge-output-format",
+    "mp4",
+    "-f",
+    "bv*+ba/b",
+    "-o",
+    outputTemplate,
+    "--print",
+    "after_move:filepath",
+    mediaUrl
+  ];
+  const { stdout } = await execFileAsync("yt-dlp", args, { timeout: 120000, maxBuffer: 1024 * 1024 * 2 });
+  const filePath = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+  if (!filePath) throw new Error("yt-dlp 未返回下载文件路径");
+  return {
+    filePath,
+    filename: path.basename(filePath),
+    source: "yt-dlp",
+    size: await fileSize(filePath)
+  };
+}
+
 async function importToEagle(importPlan, payload, metadata, folders, annotation) {
+  if (importPlan.kind === "media-url") {
+    const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType);
+    importPlan.asset = asset;
+    return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
+  }
+  if (importPlan.kind === "asset-url") {
+    const asset = await downloadRemoteAsset(importPlan.assetUrl, metadata, importPlan.sourceType).catch(() => null);
+    if (asset?.filePath) {
+      importPlan.asset = asset;
+      return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
+    }
+    return importAssetUrlToEagle(importPlan.assetUrl, payload, metadata, folders, annotation);
+  }
   if (importPlan.kind === "media-file" || importPlan.kind === "screenshot" || importPlan.kind === "html-snapshot") {
     return importPathToEagle(importPlan.asset.filePath, payload, metadata, folders, annotation);
   }
-  if (importPlan.kind === "asset-url") {
-    return importAssetUrlToEagle(importPlan.assetUrl, payload, metadata, folders, annotation);
-  }
   return importUrlToEagle(payload, metadata, folders, annotation);
+}
+
+async function downloadRemoteAsset(assetUrl, metadata, sourceType = "asset") {
+  if (!assetUrl) throw new Error("远程素材 URL 为空");
+  const response = await fetch(assetUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 Chrome Clip Router",
+      Referer: sourceType === "xiaohongshu" ? "https://www.xiaohongshu.com/" : undefined
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`远程素材下载失败：${response.status}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length) throw new Error("远程素材内容为空");
+
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const contentType = response.headers.get("content-type") || "";
+  const ext = extensionFromContentType(contentType) || extensionFromUrl(assetUrl) || "jpg";
+  const filename = `${Date.now()}-${safeShellName(metadata.titleZh || sourceType)}-${Math.random().toString(16).slice(2, 8)}.${ext}`;
+  const filePath = path.join(dir, filename);
+  await fs.writeFile(filePath, buffer);
+  return {
+    filePath,
+    filename,
+    source: "remote-url",
+    sourceUrl: assetUrl,
+    mimeType: contentType,
+    size: buffer.length
+  };
+}
+
+function extensionFromContentType(contentType) {
+  const type = String(contentType || "").split(";")[0].trim().toLowerCase();
+  const map = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov"
+  };
+  return map[type] || "";
+}
+
+function extensionFromUrl(assetUrl) {
+  try {
+    const ext = path.extname(new URL(assetUrl).pathname).replace(".", "").toLowerCase();
+    return ["jpg", "jpeg", "png", "webp", "gif", "mp4", "webm", "mov", "m4v"].includes(ext) ? ext : "";
+  } catch (_error) {
+    return "";
+  }
 }
 
 async function importPathToEagle(filePath, payload, metadata, folders, annotation) {
@@ -355,7 +480,8 @@ async function importPathToEagle(filePath, payload, metadata, folders, annotatio
       name: buildName(payload, metadata),
       website,
       annotation: trimField(annotation, 1800),
-      folderId: folders[0]?.id || undefined
+      tags: buildTags(payload, folders, metadata),
+      folderIds: folders.map((folder) => folder.id).filter(Boolean)
     }
   });
 }
@@ -383,7 +509,7 @@ function buildEagleBody(payload, metadata, folders, annotation, source, options 
     annotation: trimField(annotation, 1800),
     tags: buildTags(payload, folders, metadata)
   };
-  if (includeFolderId) body.folderId = folders[0]?.id || undefined;
+  if (includeFolderId) body.folderIds = folders.map((folder) => folder.id).filter(Boolean);
   if (source.url === payload.url) body.website = website;
   if (source.path) body.website = website;
   return body;
@@ -418,6 +544,8 @@ function summarizeImportPlan(importPlan) {
     filePath: importPlan.asset?.filePath || "",
     size: importPlan.asset?.size || 0,
     assetUrl: importPlan.assetUrl || "",
+    mediaUrl: importPlan.mediaUrl || "",
+    poster: importPlan.poster || "",
     width: importPlan.width || 0,
     height: importPlan.height || 0,
     reason: importPlan.reason || ""
@@ -440,7 +568,7 @@ function buildEaglePreview(payload, metadata, folders, annotation, importPlan) {
   return [
     `名称：${buildName(payload, metadata)}`,
     `入库方式：${importPlanLabel(importPlan)}`,
-    `目标文件夹：${folders.map((folder) => folder.name).join(" / ")}`,
+    `文件夹：${folders.map((folder) => folder.name).join(" / ")}`,
     `标签：${buildTags(payload, folders, metadata).join("、")}`,
     "",
     "注释：",
@@ -462,6 +590,8 @@ function buildEaglePreviewFields(payload, metadata, folders, annotation, importP
 
 function importPlanLabel(importPlan) {
   if (importPlan.kind === "media-file") return `媒体文件 ${importPlan.asset?.filename || ""}`.trim();
+  if (importPlan.kind === "media-url" && importPlan.sourceType === "xiaohongshu") return `小红书视频 ${importPlan.mediaUrl || ""}`.trim();
+  if (importPlan.kind === "media-url") return `页面视频 ${importPlan.mediaUrl || ""}`.trim();
   if (importPlan.kind === "screenshot") return `当前可见区域截图 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "html-snapshot") return `网页快照 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "asset-url" && importPlan.sourceType === "xiaohongshu") return `小红书图片 ${importPlan.assetUrl || ""}`.trim();
@@ -483,7 +613,7 @@ function normalizeSelectedCandidates(writePlan, candidateIds = []) {
 
 async function listItemIds() {
   try {
-    const response = await request("/api/item/list?limit=5000");
+    const response = await request("/api/item/list?limit=120");
     const items = response?.data || response?.items || [];
     return new Set(items.map((item) => item.id).filter(Boolean));
   } catch (_error) {
@@ -513,14 +643,14 @@ async function resolveImportedItem(response, beforeIds, payload, importPlan, met
     await wait(attempt < 3 ? 900 : 1500);
     const items = await listItems(80).catch(() => []);
     const created = items.filter((item) => item.id && !beforeIds.has(item.id));
-    const exact = created.find((item) => isExpectedMediaItem(item, importPlan, payload) && itemHasAnyFolder(item, folders))
+    const exact = created.find((item) => isExpectedLocalAssetItem(item, importPlan, payload) && itemHasAnyFolder(item, folders))
       || created.find((item) => isPlausibleImportedItem(item, payload, importPlan, metadata, folders))
-      || created.find((item) => isExpectedMediaItem(item, importPlan, payload));
+      || created.find((item) => isExpectedLocalAssetItem(item, importPlan, payload));
     if (exact) return exact;
   }
 
-  if (importPlan.kind === "media-file") {
-    const media = await findExistingMediaItem(payload, importPlan).catch(() => null);
+  if (["media-file", "media-url", "asset-url"].includes(importPlan.kind)) {
+    const media = await findExistingLocalAssetItem(payload, importPlan).catch(() => null);
     if (media) return media;
   }
 
@@ -538,9 +668,9 @@ function extractResponseItemId(response) {
   return response?.data?.id || response?.id || "";
 }
 
-async function findExistingMediaItem(payload, importPlan) {
+async function findExistingLocalAssetItem(payload, importPlan) {
   const items = await listItems(5000);
-  return items.find((item) => isExpectedMediaItem(item, importPlan, payload)) || null;
+  return items.find((item) => isExpectedLocalAssetItem(item, importPlan, payload)) || null;
 }
 
 async function listItems(limit = 50) {
@@ -589,7 +719,7 @@ async function getItemInfoFromAnySource(itemId) {
 
 function isPlausibleImportedItem(item, payload, importPlan, metadata, folders = []) {
   if (!item) return false;
-  if (isExpectedMediaItem(item, importPlan, payload)) return true;
+  if (isExpectedLocalAssetItem(item, importPlan, payload)) return true;
   const expectedName = buildName(payload, metadata);
   const contentOk = item.url === payload.url
     || item.website === payload.url
@@ -599,13 +729,32 @@ function isPlausibleImportedItem(item, payload, importPlan, metadata, folders = 
 }
 
 function isExpectedMediaItem(item, importPlan, payload) {
-  if (!item || importPlan?.kind !== "media-file") return false;
+  if (!item || !["media-file", "media-url"].includes(importPlan?.kind)) return false;
   const itemText = JSON.stringify(item);
   const filename = importPlan.asset?.filename || "";
   const expectedSize = Number(importPlan.asset?.size || 0);
   const itemSize = Number(item.size || 0);
   const extOk = ["mp4", "mov", "m4v", "webm"].includes(String(item.ext || "").toLowerCase());
-  const sourceOk = item.url === payload.url || item.website === payload.url || (filename && itemText.includes(filename));
+  const sourceOk = item.url === payload.url
+    || item.website === payload.url
+    || (filename && itemText.includes(filename))
+    || (importPlan.mediaUrl && itemText.includes(importPlan.mediaUrl));
+  const sizeOk = expectedSize > 0 && itemSize > 0 && Math.abs(itemSize - expectedSize) < Math.max(8192, expectedSize * 0.05);
+  return extOk && (sourceOk || sizeOk || importPlan.kind === "media-url");
+}
+
+function isExpectedLocalAssetItem(item, importPlan, payload) {
+  if (isExpectedMediaItem(item, importPlan, payload)) return true;
+  if (!item || importPlan?.kind !== "asset-url" || !importPlan.asset?.filePath) return false;
+  const itemText = JSON.stringify(item);
+  const filename = importPlan.asset?.filename || "";
+  const expectedSize = Number(importPlan.asset?.size || 0);
+  const itemSize = Number(item.size || 0);
+  const extOk = ["jpg", "jpeg", "png", "webp", "gif"].includes(String(item.ext || "").toLowerCase());
+  const sourceOk = item.url === payload.url
+    || item.website === payload.url
+    || (filename && itemText.includes(filename))
+    || (importPlan.assetUrl && itemText.includes(importPlan.assetUrl));
   const sizeOk = expectedSize > 0 && itemSize > 0 && Math.abs(itemSize - expectedSize) < Math.max(8192, expectedSize * 0.05);
   return extOk && (sourceOk || sizeOk);
 }
@@ -627,6 +776,15 @@ function buildImportPreviewField(importPlan) {
       kind: "video",
       src: importPlan.asset?.filePath || "",
       size: importPlan.asset?.size || 0
+    };
+  }
+  if (importPlan.kind === "media-url") {
+    return {
+      label,
+      value: importPlanLabel(importPlan),
+      kind: "remote-video",
+      src: importPlan.mediaUrl || "",
+      poster: importPlan.poster || ""
     };
   }
   return { label, value: importPlanLabel(importPlan), kind: "text" };
