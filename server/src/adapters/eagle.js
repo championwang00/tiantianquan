@@ -195,8 +195,11 @@ async function buildImportCandidates(payload, metadata) {
   }
 
   if (sourceType === "xiaohongshu") {
-    const imageCandidates = buildXiaohongshuImageCandidates(payload, sourceType);
+    const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
     candidates.push(...imageCandidates);
+  } else {
+    const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
+    candidates.push(...imageCandidates.slice(0, 6));
   }
 
   if (payload.screenshotDataUrl) {
@@ -263,25 +266,25 @@ function detectSourceType(url) {
   return "webpage";
 }
 
-function buildXiaohongshuImageCandidates(payload, sourceType) {
+function buildContentImageCandidates(payload, sourceType, options = {}) {
   const seen = new Set();
   const images = [
-    payload.pageMeta?.image ? { src: payload.pageMeta.image, alt: "小红书封面图", width: 0, height: 0 } : null,
+    payload.pageMeta?.image ? { src: payload.pageMeta.image, alt: `${options.labelPrefix || "内容图片"} 1`, width: 0, height: 0 } : null,
     ...(payload.pageAssets?.images || [])
   ].filter(Boolean);
 
   return images
     .map((image, index) => {
-      const src = normalizeXiaohongshuImageUrl(image.src || "");
+      const src = normalizeContentImageUrl(image.src || "", sourceType);
       if (!src || seen.has(src)) return null;
       seen.add(src);
       return makeCandidate({
         kind: "asset-url",
         sourceType,
         assetUrl: src,
-        selected: index === 0,
-        label: image.alt || `小红书图片 ${index + 1}`,
-        id: `xiaohongshu-image:${index + 1}:${safeShellName(src)}`,
+        selected: Boolean(options.selectedFirst && index === 0),
+        label: image.alt || `${options.labelPrefix || "内容图片"} ${index + 1}`,
+        id: `content-image:${index + 1}:${safeShellName(src)}`,
         width: image.width || 0,
         height: image.height || 0
       });
@@ -290,14 +293,16 @@ function buildXiaohongshuImageCandidates(payload, sourceType) {
     .slice(0, 8);
 }
 
-function normalizeXiaohongshuImageUrl(url) {
+function normalizeContentImageUrl(url, sourceType) {
   const text = String(url || "").trim();
   if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
   try {
     const parsed = new URL(text);
-    for (const key of [...parsed.searchParams.keys()]) {
-      if (["imageView2", "format", "x-oss-process"].includes(key) || key.startsWith("image")) {
-        parsed.searchParams.delete(key);
+    if (sourceType === "xiaohongshu") {
+      for (const key of [...parsed.searchParams.keys()]) {
+        if (["imageView2", "format", "x-oss-process"].includes(key) || key.startsWith("image")) {
+          parsed.searchParams.delete(key);
+        }
       }
     }
     return parsed.toString();
@@ -460,6 +465,7 @@ function importPlanLabel(importPlan) {
   if (importPlan.kind === "screenshot") return `当前可见区域截图 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "html-snapshot") return `网页快照 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "asset-url" && importPlan.sourceType === "xiaohongshu") return `小红书图片 ${importPlan.assetUrl || ""}`.trim();
+  if (importPlan.kind === "asset-url" && importPlan.label) return `${importPlan.label} ${importPlan.assetUrl || ""}`.trim();
   if (importPlan.kind === "asset-url") return `页面首图 ${importPlan.assetUrl || ""}`.trim();
   return "网页 URL 元数据";
 }
