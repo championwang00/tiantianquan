@@ -1,7 +1,6 @@
 # Sync Rules
 
-This file mirrors the core decisions from
-`/Users/chaopiwang/Downloads/chrome-clip-router-implementation.md`.
+This file records the project's core synchronization decisions.
 
 ## Defaults
 
@@ -11,8 +10,8 @@ This file mirrors the core decisions from
 - Tasks are independent per target. One target failure must not block another.
 - Bear starts as `needs_review` and returns a draft by default.
 - Obsidian defaults to `auto`, then resolves to `journal`, `thought`, or `clip`.
-- Eagle uses the local Eagle API at `http://localhost:41595` and the Neo
-  library path `/Volumes/chaopiwang/Desktop/Neo.library`.
+- Eagle uses the local Eagle API at `http://localhost:41595` and a
+  user-configured Eagle library path.
 
 ## Current MVP Behavior
 

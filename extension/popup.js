@@ -1,20 +1,24 @@
 let activeTab = null;
 let currentTasks = {};
 let eagleFolders = [];
+let eagleFoldersLoaded = false;
 let selectedEagleFolderIds = [];
 let selectedEagleCandidateIds = [];
+let selectedBearCandidateIds = [];
 let routerToken = "";
 const confirmingTargets = new Set();
+const pollingTargets = new Set();
 const successResetTimers = new Map();
 let eagleFolderMenuOpen = false;
 let eagleFolderMenuQuery = "";
 let lastScrollTop = 0;
 let restoringScroll = false;
 let trackedScroller = null;
+const SESSION_TASKS_KEY = "clipRouterActiveTasks";
 
 const CHANNELS = {
   eagle: { label: "Eagle", confirm: (taskId) => confirmEagle(taskId, getEagleFolderIds(), getEagleCandidateIds()) },
-  bear: { label: "Bear", confirm: (taskId, task) => confirmBear(taskId, task.results?.bear?.draft, getBearIncludeScreenshot()) },
+  bear: { label: "Bear", confirm: (taskId, task) => confirmBear(taskId, task.results?.bear?.draft, getBearIncludeScreenshot(), getBearCandidateIds()) },
   obsidian: { label: "Obsidian", confirm: confirmObsidian }
 };
 
@@ -30,6 +34,7 @@ init();
 
 async function init() {
   bindStaticActions();
+  bindBackgroundTaskUpdates();
   trackScrollPosition();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeTab = tab;
@@ -44,6 +49,7 @@ async function init() {
     setShellState("error");
     setStatus(`读取配置失败：${error.message}`);
   });
+  await restoreActiveTasks().catch(() => {});
   updateConfirmState();
 
   for (const card of elements.cards) {
@@ -84,17 +90,19 @@ async function hydrateOptions() {
   document.querySelector("#eagleCaptureMode").value = config.eagleCaptureMode || "screenshot";
   document.querySelector("#bearScreenshotToggle").checked = config.bearNoScreenshot !== true;
   document.querySelector("#obsidianMode").value = config.obsidianMode || "auto";
-  await hydrateEagleFolders([]);
+  hydrateEagleFolders([]).catch(() => {});
 }
 
 async function hydrateEagleFolders(savedFolderIds = []) {
   try {
     const response = await getEagleFolders();
     eagleFolders = response.folders || [];
+    eagleFoldersLoaded = true;
     if (!eagleFolders.length) throw new Error("Eagle 未返回文件夹");
     selectedEagleFolderIds = savedFolderIds.filter((id) => eagleFolders.some((folder) => folder.id === id));
-    renderEagleFolderPicker();
+    rerenderEaglePreview();
   } catch (error) {
+    eagleFoldersLoaded = true;
     setCardInlineState("eagle", `文件夹读取失败：${error.message}`);
   }
 }
@@ -122,13 +130,20 @@ function setCardOpen(target, open) {
 async function prepareOpenTargets() {
   const targets = getOpenTargets();
   if (!targets.length || !activeTab?.url) return;
+  const restored = await restoreActiveTasks();
+  const pendingTargets = targets.filter((target) => !restored.includes(target));
+  if (!pendingTargets.length) {
+    setStatus("已恢复上次生成的预览。");
+    updateConfirmState();
+    return;
+  }
 
   setShellState("loading");
   setStatus("正在生成展开项预览...");
 
   try {
     await persistOptions(targets);
-    for (const target of targets) {
+    for (const target of pendingTargets) {
       await prepareTarget(target);
     }
     setStatus("预览已生成。");
@@ -145,15 +160,37 @@ async function prepareTarget(target) {
   setShellState("loading");
   setCardStatus(target, "生成中");
   setCardBusy(target, true);
-  setCardLoading(target, "正在读取页面并生成这个渠道的确认内容...");
+  setCardHasContent(target, false);
+  setCardLoading(target, target === "eagle" && isRichMediaUrl(activeTab.url)
+    ? "正在后台读取页面并识别视频，可能需要十几秒..."
+    : "正在后台读取页面并生成这个渠道的确认内容...");
   setCardPreview(target, []);
   setCardConfirmState(target);
   try {
-    await persistOptions(getOpenTargets());
-    const payload = await buildPayload(target);
-    const result = await sendClip(payload);
-    currentTasks[target] = { id: result.taskId, target };
+    await withTimeout(persistOptions(getOpenTargets()), 3000, "保存配置超时");
+    const result = await withTimeout(
+      startBackgroundPrepare(target),
+      target === "eagle" && isRichMediaUrl(activeTab.url) ? 30000 : 20000,
+      "后台页面采集超时，请保持当前页面打开后重试"
+    );
+    currentTasks[target] = {
+      id: result.taskId,
+      target,
+      results: { [target]: { status: "queued" } }
+    };
+    await persistTaskState(target, currentTasks[target]);
     await pollTask(result.taskId, target);
+  } catch (error) {
+    setShellState("error");
+    setCardBusy(target, false);
+    setCardStatus(target, "失败");
+    setCardInlineState(target, `生成失败：${error.message}`);
+    setCardPreview(target, error.message);
+    if (currentTasks[target]?.results?.[target]) {
+      currentTasks[target].results[target].status = "failed";
+      currentTasks[target].results[target].reason = error.message;
+    }
+    setCardConfirmState(target);
   } finally {
     updateConfirmState();
   }
@@ -162,6 +199,7 @@ async function prepareTarget(target) {
 function refreshIfOpen(target) {
   if (!getCard(target).classList.contains("is-open")) return;
   delete currentTasks[target];
+  removeTaskState(target).catch(() => {});
   prepareTarget(target).catch((error) => {
     setShellState("error");
     setCardBusy(target, false);
@@ -185,6 +223,7 @@ async function confirmChannel(target) {
     setCardConfirmState(target);
     const task = await CHANNELS[target].confirm(taskState.id, taskState);
     currentTasks[target] = { ...task, target };
+    await persistTaskState(target, currentTasks[target]);
     renderTaskForTarget(task, target);
     scheduleSuccessReset(target);
     setStatus(`${CHANNELS[target].label} 写入完成。对应软件已尝试唤起。`);
@@ -202,6 +241,28 @@ async function confirmChannel(target) {
     setCardConfirmState(target);
   }
   updateConfirmState();
+}
+
+async function startBackgroundPrepare(target) {
+  // Keep submission in the popup lifecycle. Waiting for an MV3 service worker
+  // response can hang indefinitely even though the popup is still active.
+  const payload = await buildPayload(target);
+  const result = await sendClip(payload);
+  if (!result?.taskId) throw new Error("本地服务没有返回任务 ID");
+  return { taskId: result.taskId, target, submittedBy: "popup" };
+}
+
+function bindBackgroundTaskUpdates() {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "session" || !changes[SESSION_TASKS_KEY]) return;
+    const activeTasks = changes[SESSION_TASKS_KEY].newValue || {};
+    for (const [target, state] of Object.entries(activeTasks)) {
+      if (!CHANNELS[target] || state.url !== activeTab?.url || !state.task?.id) continue;
+      currentTasks[target] = { ...state.task, target };
+      renderTaskForTarget(currentTasks[target], target);
+    }
+    updateConfirmState();
+  });
 }
 
 function scheduleSuccessReset(target) {
@@ -226,11 +287,27 @@ function clearSuccessReset(target) {
   successResetTimers.delete(target);
 }
 
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
+  ]);
+}
+
 async function buildPayload(target) {
-  const needsScreenshot = (target === "eagle" && getEagleCaptureMode() === "screenshot") || target === "bear";
+  const isRichMedia = isRichMediaUrl(activeTab?.url || "");
+  const needsScreenshot = (target === "eagle" && (getEagleCaptureMode() === "screenshot" || isRichMedia)) || target === "bear";
+  const needsFullContent = target !== "eagle" || getEagleCaptureMode() === "snapshot";
+  const needsDeepAssets = target !== "eagle" || isRichMedia || getEagleCaptureMode() === "top-image";
   const [screenshotDataUrl, pageContext] = await Promise.all([
-    needsScreenshot ? captureVisibleTabSafely() : Promise.resolve(""),
-    collectPageContext(activeTab)
+    needsScreenshot
+      ? withTimeout(captureVisibleTabSafely(), 4000, "截图超时").catch(() => "")
+      : Promise.resolve(""),
+    withTimeout(
+      collectPageContext(activeTab, { fullContent: needsFullContent, deepAssets: needsDeepAssets }),
+      5000,
+      "页面扫描超时"
+    ).catch(() => emptyPageContext())
   ]);
 
   return {
@@ -263,41 +340,82 @@ async function buildPayload(target) {
   };
 }
 
-async function collectPageContext(tab) {
+async function collectPageContext(tab, options = {}) {
   if (!tab?.id) return emptyPageContext();
 
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => {
+      args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
+      func: ({ fullContent, deepAssets }) => {
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
-        const article = findReadableRoot();
-        const text = (article?.innerText || document.body.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 60000);
-        const markdown = nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000);
-        const htmlSnapshot = `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000);
-        const images = collectImages().slice(0, 20);
-        const videos = collectVideos().slice(0, 10);
+        const mainTweetRoot = findMainTweetRoot();
+        const article = findReadableRoot(mainTweetRoot);
+        const visibleText = getVisibleText(article);
+        const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 20 : 6);
+        const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 10) : [];
+        const videoRects = deepAssets ? collectVideoRects(mainTweetRoot).slice(0, 5) : [];
+        const content = fullContent
+          ? {
+              text: (visibleText || getVisibleText(document.body)).slice(0, 60000),
+              markdown: nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000),
+              htmlSnapshot: `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000)
+            }
+          : { text: "", markdown: "", htmlSnapshot: "" };
         return {
           meta: {
             description: metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
             author: metaContent('meta[name="author"]') || metaContent('meta[property="article:author"]'),
             siteName: metaContent('meta[property="og:site_name"]'),
-            image: metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]'),
+            image: normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')),
             canonical: attr('link[rel="canonical"]', "href"),
             published: metaContent('meta[property="article:published_time"]') || metaContent('meta[name="article:published_time"]')
           },
-          assets: { images, videos },
-          content: { text, markdown, htmlSnapshot }
+          assets: {
+            images,
+            videos,
+            videoRects,
+            viewport: {
+              width: window.innerWidth || document.documentElement.clientWidth || 0,
+              height: window.innerHeight || document.documentElement.clientHeight || 0,
+              devicePixelRatio: window.devicePixelRatio || 1
+            }
+          },
+          content
         };
 
-        function findReadableRoot() {
+        function findReadableRoot(scopeRoot = null) {
+          if (scopeRoot) return scopeRoot;
+          const socialRoot = findSocialContentRoot();
+          if (socialRoot) return socialRoot;
           const candidates = [
             ...document.querySelectorAll("article, main, [role='main'], .article, .post, .entry-content, .markdown-body, .content")
           ].filter(Boolean);
           return candidates
             .map((node) => ({ node, score: readableScore(node) }))
             .sort((a, b) => b.score - a.score)[0]?.node || document.body;
+        }
+
+        function findSocialContentRoot(scopeRoot = document) {
+          const tweetTextNodes = [...scopeRoot.querySelectorAll('[data-testid="tweetText"], [lang][dir="auto"]')]
+            .filter((node) => (node.innerText || "").trim().length > 8);
+          if (!tweetTextNodes.length) return null;
+          const container = document.createElement("div");
+          container.dataset.syntheticReadableRoot = "social";
+          for (const node of tweetTextNodes.slice(0, 12)) {
+            const block = document.createElement("p");
+            block.textContent = getVisibleText(node);
+            container.append(block);
+          }
+          return container;
+        }
+
+        function getVisibleText(node) {
+          return (node?.innerText || node?.textContent || "")
+            .replace(/\n{3,}/g, "\n\n")
+            .replace(/[ \t]{2,}/g, " ")
+            .trim();
         }
 
         function readableScore(node) {
@@ -307,18 +425,38 @@ async function collectPageContext(tab) {
           return textLength + paragraphCount * 180 + imageCount * 80;
         }
 
-        function collectImages() {
+        function findMainTweetRoot() {
+          const statusId = location.pathname.match(/\/status\/(\d+)/)?.[1] || "";
+          if (!statusId) return null;
+          const primaryColumn = document.querySelector('[data-testid="primaryColumn"], main');
+          const articles = [...(primaryColumn || document).querySelectorAll('article[data-testid="tweet"], article')];
+          const byStatusLink = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
+            .some((link) => {
+              try {
+                return new URL(link.href, location.href).pathname.includes(`/status/${statusId}`);
+              } catch (_error) {
+                return false;
+              }
+            }));
+          if (byStatusLink) return byStatusLink;
+          return articles.find((article) => article.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], video, img[src*="pbs.twimg.com/media"]')) || null;
+        }
+
+        function collectImages(deep, scopeRoot = null) {
           const seen = new Set();
           const items = [];
           const push = (src, alt = "", width = 0, height = 0) => {
             const normalized = absolutize(src);
             if (!normalized || seen.has(normalized)) return;
             if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
+            if (isXDefaultOgImage(normalized)) return;
             seen.add(normalized);
             items.push({ src: normalized, alt, width, height });
           };
 
-          for (const image of [...document.images]) {
+          const imageNodes = scopeRoot ? [...scopeRoot.querySelectorAll("img")].filter((image) => image.closest("article") === scopeRoot) : [...document.images];
+          const documentImages = deep ? imageNodes : imageNodes.slice(0, 80);
+          for (const image of documentImages) {
             const srcset = image.getAttribute("srcset") || image.getAttribute("data-srcset") || "";
             const fromSrcset = pickLargestSrcset(srcset);
             push(
@@ -329,9 +467,12 @@ async function collectPageContext(tab) {
             );
           }
 
-          for (const node of [...document.querySelectorAll("[style]")]) {
-            const match = String(node.getAttribute("style") || "").match(/url\\((['"]?)(.*?)\\1\\)/);
-            if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0);
+          if (deep) {
+            const styledNodes = scopeRoot ? [...scopeRoot.querySelectorAll("[style]")] : [...document.querySelectorAll("[style]")];
+            for (const node of styledNodes) {
+              const match = String(node.getAttribute("style") || "").match(/url\\((['"]?)(.*?)\\1\\)/);
+              if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0);
+            }
           }
 
           return items
@@ -339,7 +480,16 @@ async function collectPageContext(tab) {
             .sort((a, b) => (b.width * b.height) - (a.width * a.height));
         }
 
-        function collectVideos() {
+        function normalizeMetaImage(src) {
+          const normalized = absolutize(src || "");
+          return isXDefaultOgImage(normalized) ? "" : normalized;
+        }
+
+        function isXDefaultOgImage(src) {
+          return /abs\.twimg\.com\/rweb\/ssr\/default\/v\\d+\/og\/image\.png/i.test(String(src || ""));
+        }
+
+        function collectVideos(scopeRoot = null) {
           const seen = new Set();
           const items = [];
           const push = (src, label = "", poster = "") => {
@@ -348,17 +498,18 @@ async function collectPageContext(tab) {
             if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
             if (!isLikelyVideoUrl(normalized)) return;
             seen.add(normalized);
-            items.push({ src: normalized, label, poster: absolutize(poster || "") });
+            items.push({ src: normalized, label, poster: normalizeMetaImage(poster || "") });
           };
 
-          for (const video of [...document.querySelectorAll("video")]) {
+          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => video.closest("article") === scopeRoot) : [...document.querySelectorAll("video")];
+          for (const video of videoNodes) {
             push(video.currentSrc || video.src, video.getAttribute("aria-label") || video.title || "页面视频", video.poster || "");
             for (const source of [...video.querySelectorAll("source")]) {
               push(source.src || source.getAttribute("src"), source.type || "页面视频", video.poster || "");
             }
           }
 
-          for (const selector of [
+          if (!scopeRoot) for (const selector of [
             'meta[property="og:video"]',
             'meta[property="og:video:url"]',
             'meta[property="og:video:secure_url"]',
@@ -369,10 +520,10 @@ async function collectPageContext(tab) {
             'meta[name="twitter:player"]'
           ]) {
             const value = metaContent(selector);
-            push(value, "页面视频", metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]'));
+            push(value, "页面视频", normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')));
           }
 
-          const scriptText = [...document.scripts]
+          const scriptText = scopeRoot ? "" : [...document.scripts]
             .map((script) => script.textContent || "")
             .filter((text) => /mp4|m3u8|video|stream/i.test(text))
             .join("\n")
@@ -380,6 +531,31 @@ async function collectPageContext(tab) {
           for (const url of extractVideoUrls(scriptText)) push(url, "页面视频");
 
           return items;
+        }
+
+        function collectVideoRects(scopeRoot = null) {
+          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => video.closest("article") === scopeRoot) : [...document.querySelectorAll("video")];
+          return videoNodes
+            .map((video, index) => {
+              const rect = video.getBoundingClientRect();
+              const left = Math.max(0, rect.left);
+              const top = Math.max(0, rect.top);
+              const right = Math.min(window.innerWidth || document.documentElement.clientWidth || 0, rect.right);
+              const bottom = Math.min(window.innerHeight || document.documentElement.clientHeight || 0, rect.bottom);
+              const width = Math.max(0, right - left);
+              const height = Math.max(0, bottom - top);
+              return {
+                x: left,
+                y: top,
+                width,
+                height,
+                naturalWidth: video.videoWidth || 0,
+                naturalHeight: video.videoHeight || 0,
+                label: video.getAttribute("aria-label") || video.title || `页面视频 ${index + 1}`
+              };
+            })
+            .filter((rect) => rect.width >= 120 && rect.height >= 80)
+            .sort((a, b) => (b.width * b.height) - (a.width * a.height));
         }
 
         function extractVideoUrls(text) {
@@ -508,7 +684,28 @@ function emptyPageContext() {
   return { meta: {}, assets: { images: [] }, content: { text: "", markdown: "", htmlSnapshot: "" } };
 }
 
+function isRichMediaUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return host === "x.com"
+      || host === "twitter.com"
+      || host.endsWith(".x.com")
+      || host.endsWith(".twitter.com")
+      || host === "xiaohongshu.com"
+      || host.endsWith(".xiaohongshu.com");
+  } catch (_error) {
+    return false;
+  }
+}
+
 async function captureVisibleTabSafely() {
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(activeTab?.windowId, { format: "png" });
+    if (dataUrl) return dataUrl;
+  } catch (_error) {
+    // Fall through to the background service worker capture path.
+  }
+
   try {
     const response = await chrome.runtime.sendMessage({ type: "CAPTURE_VISIBLE_TAB" });
     return response?.dataUrl || "";
@@ -519,6 +716,17 @@ async function captureVisibleTabSafely() {
 
 async function pollTask(taskId, target, attempt = 0) {
   if (!taskId) return;
+  const pollKey = `${target}:${taskId}`;
+  if (pollingTargets.has(pollKey)) return;
+  pollingTargets.add(pollKey);
+  try {
+    await pollTaskLoop(taskId, target, attempt, pollKey);
+  } finally {
+    pollingTargets.delete(pollKey);
+  }
+}
+
+async function pollTaskLoop(taskId, target, attempt = 0, pollKey = "") {
   if (attempt > 24) {
     setShellState("error");
     setCardBusy(target, false);
@@ -527,15 +735,71 @@ async function pollTask(taskId, target, attempt = 0) {
     setCardConfirmState(target);
     return;
   }
-  await new Promise((resolve) => setTimeout(resolve, attempt < 4 ? 900 : 1500));
+  await new Promise((resolve) => setTimeout(resolve, attempt < 2 ? 250 : attempt < 6 ? 650 : 1200));
 
   const task = await getTask(taskId);
   currentTasks[target] = { ...task, target };
+  await persistTaskState(target, currentTasks[target]);
   renderTaskForTarget(task, target);
   const targetStatus = task.results?.[target]?.status;
   if (["queued", "running"].includes(targetStatus)) {
-    await pollTask(taskId, target, attempt + 1);
+    await pollTaskLoop(taskId, target, attempt + 1, pollKey);
   }
+}
+
+async function restoreActiveTasks() {
+  if (!activeTab?.url) return [];
+  const activeTasks = await getStoredActiveTasks();
+  const restored = [];
+  for (const [target, state] of Object.entries(activeTasks)) {
+    if (!CHANNELS[target] || state.url !== activeTab.url || !state.taskId) continue;
+    setCardOpen(target, true);
+    setCardBusy(target, true);
+    setCardStatus(target, "恢复中");
+    setCardLoading(target, "正在恢复刚才的生成进度...");
+    currentTasks[target] = {
+      id: state.taskId,
+      target,
+      ...(state.task || {})
+    };
+    restored.push(target);
+    pollTask(state.taskId, target).catch((error) => {
+      setCardBusy(target, false);
+      setCardStatus(target, "失败");
+      setCardInlineState(target, `恢复失败：${error.message}`);
+      setCardConfirmState(target);
+    });
+  }
+  if (restored.length) setShellState("loading");
+  return restored;
+}
+
+async function persistTaskState(target, task) {
+  if (!target || !task?.id || !activeTab?.url) return;
+  const activeTasks = await getStoredActiveTasks();
+  activeTasks[target] = {
+    target,
+    taskId: task.id,
+    tabId: activeTab.id || 0,
+    url: activeTab.url,
+    title: activeTab.title || activeTab.url,
+    task,
+    updatedAt: Date.now()
+  };
+  await chrome.storage.session.set({ [SESSION_TASKS_KEY]: activeTasks });
+}
+
+async function removeTaskState(target) {
+  const activeTasks = await getStoredActiveTasks();
+  if (!activeTasks[target]) return;
+  delete activeTasks[target];
+  await chrome.storage.session.set({ [SESSION_TASKS_KEY]: activeTasks });
+}
+
+async function getStoredActiveTasks() {
+  const result = await chrome.storage.session.get({ [SESSION_TASKS_KEY]: {} });
+  const activeTasks = result[SESSION_TASKS_KEY];
+  return activeTasks && typeof activeTasks === "object" && !Array.isArray(activeTasks) ? activeTasks : {};
 }
 
 function renderTaskForTarget(task, target) {
@@ -543,15 +807,17 @@ function renderTaskForTarget(task, target) {
   if (!result) return;
   if (["queued", "running"].includes(result.status)) {
     setCardBusy(target, true);
+    setCardHasContent(target, false);
     setCardStatus(target, "生成中");
     setCardLoading(target, "正在读取页面并生成这个渠道的确认内容...");
     setCardConfirmState(target);
     return;
   }
   setCardBusy(target, false);
-  if (target === "eagle") syncEagleCandidatesFromResult(result);
-  if (target === "eagle") renderEagleCandidates(result);
+  if (target === "eagle" || target === "bear") syncCandidatesFromResult(target, result);
+  if (target === "eagle" || target === "bear") renderTargetCandidates(target, result);
   setCardPreview(target, result.previewFields || result.preview || result.draft || result.reason || "");
+  setCardHasContent(target, Boolean(result.previewFields || result.preview || result.draft));
   setCardStatus(target, formatStatus(result));
   setCardInlineState(target, result.reason || formatStatus(result));
   if (target === "eagle") syncEagleFolderFromResult(result);
@@ -573,7 +839,7 @@ function clearPreparedState() {
     setCardStatus(target, "未生成");
     setCardInlineState(target, "内容已变化，展开后会重新生成预览。");
     setCardPreview(target, []);
-    if (target === "eagle") renderEagleCandidates({ status: "idle", candidates: [] });
+    if (target === "eagle" || target === "bear") renderTargetCandidates(target, { status: "idle", candidates: [] });
     setCardConfirmState(target);
   }
   updateConfirmState();
@@ -606,16 +872,23 @@ function setCardPreview(target, message) {
   withScrollPreserved(() => {
     const preview = getCard(target).querySelector('[data-role="preview"]');
     if (Array.isArray(message)) {
-      preview.replaceChildren(...message.filter((field) => field.kind !== "candidate-list").map((field) => renderField(field, target)));
+      const fields = message.filter((field) => field.kind !== "candidate-list");
+      preview.replaceChildren(...fields.map((field) => renderField(field, target)));
+      preview.hidden = fields.length === 0;
       return;
     }
-    preview.textContent = message || "没有可展示的预览。";
+    const text = String(message || "").trim();
+    preview.hidden = !text;
+    preview.textContent = text;
   });
 }
 
 function renderField(field, target = "") {
   const row = document.createElement("div");
   row.className = `preview-field preview-field-${field.kind || "text"}`;
+  if (target === "eagle" && field.label === "文件夹") {
+    row.classList.add("preview-field-folder");
+  }
 
   const label = document.createElement("div");
   label.className = "preview-label";
@@ -717,6 +990,10 @@ function setCardBusy(target, busy) {
   getCard(target).classList.toggle("is-busy", Boolean(busy));
 }
 
+function setCardHasContent(target, hasContent) {
+  getCard(target).classList.toggle("has-content", Boolean(hasContent));
+}
+
 function setCardConfirmState(target) {
   const button = getCard(target).querySelector('[data-role="confirm"]');
   if (!button) return;
@@ -757,28 +1034,43 @@ function getEagleFolderIds() {
 }
 
 function getEagleCandidateIds() {
-  const result = currentTasks.eagle?.results?.eagle;
-  const candidates = result?.candidates || result?.previewFields?.find((field) => field.kind === "candidate-list")?.value || [];
-  const validIds = new Set(candidates.map((candidate) => candidate.id));
-  return selectedEagleCandidateIds.filter((id) => validIds.has(id));
+  return getSelectedCandidateIds("eagle");
 }
 
-function syncEagleCandidatesFromResult(result) {
-  const candidates = result.candidates || result.previewFields?.find((field) => field.kind === "candidate-list")?.value || [];
+function getBearCandidateIds() {
+  return getSelectedCandidateIds("bear");
+}
+
+function getSelectedCandidateIds(target) {
+  const result = currentTasks[target]?.results?.[target];
+  const candidates = getCandidatesFromResult(result);
+  const validIds = new Set(candidates.map((candidate) => candidate.id));
+  const selectedIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
+  return selectedIds.filter((id) => validIds.has(id));
+}
+
+function syncCandidatesFromResult(target, result) {
+  const candidates = getCandidatesFromResult(result);
   if (!candidates.length) return;
   const validIds = new Set(candidates.map((candidate) => candidate.id));
-  selectedEagleCandidateIds = selectedEagleCandidateIds.filter((id) => validIds.has(id));
-  if (!selectedEagleCandidateIds.length) {
-    selectedEagleCandidateIds = candidates.filter((candidate) => candidate.selected).map((candidate) => candidate.id);
+  const currentIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
+  const nextIds = currentIds.filter((id) => validIds.has(id));
+  if (!nextIds.length) {
+    nextIds.push(...candidates.filter((candidate) => candidate.selected).map((candidate) => candidate.id));
+  }
+  if (target === "bear") {
+    selectedBearCandidateIds = nextIds;
+  } else {
+    selectedEagleCandidateIds = nextIds;
   }
 }
 
-function renderEagleCandidates(result) {
-  const panel = getCard("eagle").querySelector('[data-role="candidates"]');
+function renderTargetCandidates(target, result) {
+  const panel = getCard(target).querySelector('[data-role="candidates"]');
   if (!panel) return;
   withScrollPreserved(() => {
     const list = panel.querySelector(".candidate-list");
-    const candidates = result.candidates || result.previewFields?.find((field) => field.kind === "candidate-list")?.value || [];
+    const candidates = getCandidatesFromResult(result);
     if (!candidates.length) {
       list.className = "candidate-list candidate-list-empty";
       list.textContent = result.status === "running" || result.status === "queued"
@@ -787,8 +1079,12 @@ function renderEagleCandidates(result) {
       return;
     }
     list.className = "candidate-list";
-    list.replaceChildren(...candidates.map(renderCandidate));
+    list.replaceChildren(...candidates.map((candidate) => renderCandidate(candidate, target)));
   });
+}
+
+function getCandidatesFromResult(result) {
+  return result?.candidates || result?.previewFields?.find((field) => field.kind === "candidate-list")?.value || [];
 }
 
 function syncEagleFolderFromResult(result) {
@@ -812,7 +1108,9 @@ function renderEagleFolderEditor() {
     const tag = el("button", "folder-tag", "");
     tag.type = "button";
     tag.title = `移除 ${folder.name}`;
-    tag.append(el("span", "", folder.name), el("span", "folder-tag-remove", "×"));
+    const removeIcon = el("span", "folder-tag-remove", "");
+    removeIcon.setAttribute("aria-hidden", "true");
+    tag.append(el("span", "", folder.name), removeIcon);
     tag.addEventListener("click", () => {
       selectedEagleFolderIds = selectedEagleFolderIds.filter((id) => id !== folder.id);
       persistCurrentOptions();
@@ -922,8 +1220,9 @@ function persistCurrentOptions() {
   });
 }
 
-function renderCandidate(candidate) {
-  const checked = selectedEagleCandidateIds.includes(candidate.id);
+function renderCandidate(candidate, target = "eagle") {
+  const selectedIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
+  const checked = selectedIds.includes(candidate.id);
   const label = document.createElement("label");
   label.className = `candidate-option${checked ? " is-selected" : ""}`;
 
@@ -933,12 +1232,16 @@ function renderCandidate(candidate) {
   checkbox.addEventListener("change", () => {
     rememberScroll();
     if (checkbox.checked) {
-      selectedEagleCandidateIds = [...new Set([...selectedEagleCandidateIds, candidate.id])];
+      const nextIds = [...new Set([...selectedIds, candidate.id])];
+      if (target === "bear") selectedBearCandidateIds = nextIds;
+      else selectedEagleCandidateIds = nextIds;
     } else {
-      selectedEagleCandidateIds = selectedEagleCandidateIds.filter((id) => id !== candidate.id);
+      const nextIds = selectedIds.filter((id) => id !== candidate.id);
+      if (target === "bear") selectedBearCandidateIds = nextIds;
+      else selectedEagleCandidateIds = nextIds;
     }
-    renderEagleCandidates(currentTasks.eagle?.results?.eagle || {});
-    setCardConfirmState("eagle");
+    renderTargetCandidates(target, currentTasks[target]?.results?.[target] || {});
+    setCardConfirmState(target);
   });
 
   const body = document.createElement("span");
@@ -971,6 +1274,14 @@ function renderCandidatePreview(candidate) {
   }
 
   if (candidate.kind === "media-url" && candidate.mediaUrl) {
+    if (candidate.thumbnailPath) {
+      const image = document.createElement("img");
+      image.className = "candidate-image";
+      image.alt = `${candidateTitle(candidate)}首帧`;
+      image.src = buildPreviewAssetUrl(candidate.thumbnailPath);
+      wrap.append(image);
+      return wrap;
+    }
     const video = document.createElement("video");
     video.className = "candidate-video";
     video.controls = true;
@@ -980,6 +1291,30 @@ function renderCandidatePreview(candidate) {
     video.src = candidate.mediaUrl;
     if (candidate.poster) video.poster = candidate.poster;
     wrap.append(video);
+    return wrap;
+  }
+
+  if (candidate.kind === "twitter-url" || candidate.kind === "twitter-gif") {
+    if (candidate.thumbnailPath) {
+      const image = document.createElement("img");
+      image.className = "candidate-image";
+      image.alt = "视频首帧";
+      image.src = buildPreviewAssetUrl(candidate.thumbnailPath);
+      wrap.append(image);
+    } else if (candidate.poster) {
+      const image = document.createElement("img");
+      image.className = "candidate-image";
+      image.alt = candidate.kind === "twitter-gif" ? "X/Twitter GIF 封面" : "X/Twitter 视频封面";
+      image.src = candidate.poster;
+      image.referrerPolicy = "no-referrer";
+      wrap.append(image);
+    }
+    const text = document.createElement("span");
+    text.className = "candidate-preview-text";
+    text.textContent = candidate.kind === "twitter-gif"
+      ? "确认写入 Bear 时再下载并转换为 GIF。"
+      : "确认收录时再下载完整视频，可显著加快预览生成。";
+    wrap.append(text);
     return wrap;
   }
 
@@ -1017,6 +1352,8 @@ function renderCandidatePreview(candidate) {
 function candidateTitle(candidate) {
   const names = {
     "media-file": "X 视频",
+    "twitter-url": "X 视频",
+    "twitter-gif": "X 视频转 GIF",
     "media-url": "页面视频",
     screenshot: "当前截图",
     "html-snapshot": "HTML 快照",
@@ -1122,7 +1459,15 @@ function canScroll(node) {
 
 function buildPreviewAssetUrl(filePath) {
   const token = routerToken || (typeof DEFAULT_ROUTER_TOKEN === "string" ? DEFAULT_ROUTER_TOKEN : "");
-  return `http://127.0.0.1:18791/api/assets/preview?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token)}`;
+  return `http://127.0.0.1:18791/api/assets/preview?path=${encodeURIComponent(toWellFormedText(filePath))}&token=${encodeURIComponent(token)}`;
+}
+
+function toWellFormedText(value) {
+  const text = String(value || "");
+  if (typeof text.toWellFormed === "function") return text.toWellFormed();
+  return text
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "\uFFFD")
+    .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "$1\uFFFD");
 }
 
 function formatBytes(value) {

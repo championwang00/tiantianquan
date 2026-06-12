@@ -106,7 +106,10 @@ export function createRouter(env) {
         const body = await readJson(req);
         const task = await confirmTaskBear(bearConfirmMatch[1], {
           draft: body.draft,
-          includeScreenshot: body.includeScreenshot !== false
+          includeScreenshot: body.includeScreenshot !== false,
+          candidateIds: Array.isArray(body.candidateIds)
+            ? body.candidateIds.filter((id) => typeof id === "string")
+            : []
         });
         if (!task) {
           sendJson(res, 404, { error: "Task not found" }, headers);
@@ -297,7 +300,9 @@ function sanitizePageAssets(value) {
   const assets = sanitizeObject(value);
   return {
     images: Array.isArray(assets.images) ? assets.images.slice(0, 20) : [],
-    videos: Array.isArray(assets.videos) ? assets.videos.slice(0, 10) : []
+    videos: Array.isArray(assets.videos) ? assets.videos.slice(0, 10) : [],
+    videoRects: Array.isArray(assets.videoRects) ? assets.videoRects.slice(0, 5) : [],
+    viewport: sanitizeObject(assets.viewport)
   };
 }
 
@@ -334,7 +339,8 @@ function getPublicSettings(env) {
     llmModel: env.CLIP_ROUTER_LLM_MODEL || env.CLIP_ROUTER_MODEL || "",
     llmApiKeyConfigured: Boolean(llmApiKey),
     llmApiKeyMasked: maskSecret(llmApiKey),
-    bearNoteId: formatBearNoteLink(env.CLIP_ROUTER_BEAR_NOTE_ID || "")
+    bearNoteId: formatBearNoteLink(env.CLIP_ROUTER_BEAR_NOTE_ID || ""),
+    obsidianClipPath: sanitizeSetting(env.CLIP_ROUTER_OBSIDIAN_CLIP_PATH || "")
   };
 }
 
@@ -344,7 +350,8 @@ function updateSettings(body, env) {
     CLIP_ROUTER_LLM_API_TYPE: sanitizeSetting(body.llmApiType || "openai-chat"),
     CLIP_ROUTER_LLM_BASE_URL: sanitizeSetting(body.llmBaseUrl),
     CLIP_ROUTER_LLM_MODEL: sanitizeSetting(body.llmModel),
-    CLIP_ROUTER_BEAR_NOTE_ID: formatBearNoteLink(body.bearNoteId)
+    CLIP_ROUTER_BEAR_NOTE_ID: formatBearNoteLink(body.bearNoteId),
+    CLIP_ROUTER_OBSIDIAN_CLIP_PATH: sanitizeSetting(body.obsidianClipPath)
   };
   if (typeof body.llmApiKey === "string" && body.llmApiKey.trim() && !isMaskedSecret(body.llmApiKey)) {
     patch.CLIP_ROUTER_LLM_API_KEY = body.llmApiKey.trim();
@@ -391,7 +398,8 @@ function writeEnvFile(env) {
     "CLIP_ROUTER_LLM_BASE_URL",
     "CLIP_ROUTER_LLM_MODEL",
     "CLIP_ROUTER_LLM_API_KEY",
-    "CLIP_ROUTER_BEAR_NOTE_ID"
+    "CLIP_ROUTER_BEAR_NOTE_ID",
+    "CLIP_ROUTER_OBSIDIAN_CLIP_PATH"
   ];
   const lines = [];
   for (const key of keys) {

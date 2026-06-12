@@ -18,15 +18,8 @@ const BEAR_DB_CANDIDATES = [
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
-  const twitterGif = isTwitterUrl(payload.url)
-    ? await buildTwitterGifForBear(payload, metadata).catch(() => null)
-    : null;
-  const screenshot = payload.screenshotDataUrl
-    ? await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "bear-screenshot", "jpg")
-    : null;
-  const compactScreenshot = screenshot ? await compactImageForBear(screenshot).catch(() => null) : null;
-  const visualAsset = twitterGif || compactScreenshot;
-  const visualPreview = visualAsset ? await buildDataUrlPreview(visualAsset).catch(() => "") : "";
+  const candidates = await buildBearCandidates(payload, metadata);
+  const visualAsset = summarizeCandidates(candidates).find((candidate) => candidate.selected) || null;
   const draftParts = buildBearDraftParts(payload, metadata, visualAsset);
   const draftNoScreenshot = buildBearDraftParts(payload, metadata, null).full;
   const draft = draftParts.full;
@@ -35,12 +28,14 @@ export async function runBearAdapter(payload) {
     status: "needs_review",
     reason: "等待用户在插件内确认后再写入 Bear",
     noteId: getBearNoteId(),
-    screenshot: visualAsset ? "ready" : "missing",
+    screenshot: candidates.length ? "ready" : "missing",
     screenshotFile: visualAsset,
+    candidates: summarizeCandidates(candidates),
     draft,
     draftNoScreenshot,
     draftParts,
-    previewFields: buildBearPreviewFields(payload, metadata, visualAsset, visualPreview),
+    previewFields: buildBearPreviewFields(payload, metadata, candidates),
+    writePlan: { metadata, candidates },
     metadata
   };
 }
@@ -57,22 +52,25 @@ async function confirmBearWriteInner(task, options) {
   }
 
   const includeScreenshot = options.includeScreenshot !== false;
+  const selectedAssets = includeScreenshot ? await resolveSelectedBearAssets(task, options) : [];
   const draft = includeScreenshot
-    ? (options.draft || result.draft)
+    ? buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets).full
     : (result.draftNoScreenshot || buildBearDraftParts(task.payload, result.metadata || {}, null).full);
-  if (includeScreenshot && result.screenshotFile?.filePath) {
-    const draftParts = result.draftParts || buildBearDraftParts(task.payload, result.metadata || {}, result.screenshotFile);
+  if (includeScreenshot && selectedAssets.length) {
+    const draftParts = buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets);
     await appendToBear(draftParts.beforeImage);
-    await addFileToBear(result.screenshotFile.filePath, result.screenshotFile.filename);
-    await wait(1400);
-    await indentBearImageLine(result.screenshotFile.filename);
+    for (const asset of selectedAssets) {
+      await addFileToBear(asset.filePath, asset.filename);
+      await wait(900);
+      await indentBearImageLine(asset.filename);
+    }
     await appendToBear(draftParts.afterImage);
   } else {
     await appendToBear(draft);
   }
   await wait(1800);
-  const verification = await verifyBearUrl(task.payload.url, includeScreenshot ? result.screenshotFile?.filename || "" : "");
-  const mediaOk = !includeScreenshot || !result.screenshotFile?.filename || verification.imageRefCount > 0;
+  const verification = await verifyBearUrl(task.payload.url, includeScreenshot ? selectedAssets.map((asset) => asset.filename) : []);
+  const mediaOk = !includeScreenshot || !selectedAssets.length || verification.imageRefCount >= selectedAssets.length;
   if (verification.count < 1 || !mediaOk) {
     return {
       ...result,
@@ -87,6 +85,8 @@ async function confirmBearWriteInner(task, options) {
     status: "success",
     reason: "Bear 写入并验证成功",
     writtenAt: new Date().toISOString(),
+    screenshotFile: selectedAssets[0] || result.screenshotFile || null,
+    writtenAssets: selectedAssets,
     verification
   };
 }
@@ -103,8 +103,9 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
     `  * ${summary}`,
     `  * ${payload.url}`
   ].join("\n");
+  const assets = Array.isArray(visualAsset) ? visualAsset : [visualAsset].filter(Boolean);
 
-  if (!visualAsset) {
+  if (!assets.length) {
     return {
       beforeImage,
       afterImage,
@@ -115,7 +116,11 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
   return {
     beforeImage,
     afterImage,
-    full: [beforeImage, `  * [${visualAsset.label || "媒体"}将由 Bear 附件写入：${visualAsset.filename}]`, afterImage].join("\n")
+    full: [
+      beforeImage,
+      ...assets.map((asset) => `  * [${asset.label || "媒体"}将由 Bear 附件写入：${asset.filename}]`),
+      afterImage
+    ].join("\n")
   };
 }
 
@@ -125,17 +130,10 @@ function buildTitle(payload, metadata) {
   return `${title} — ${oneLine}`.replace(/\s+/g, " ").trim();
 }
 
-function buildBearPreviewFields(payload, metadata, visualAsset, visualPreview) {
-  const visualLabel = visualAsset?.kind === "gif" ? "动图" : "截图";
+function buildBearPreviewFields(payload, metadata, candidates) {
   return [
     { label: "标题", value: buildTitle(payload, metadata), kind: "text" },
-    {
-      label: visualLabel,
-      value: visualAsset?.filename || (isTwitterUrl(payload.url) ? "未识别到可转换的 X 视频，确认时会使用截图或纯文本" : "截图未捕获或压缩后仍过大"),
-      kind: visualAsset?.filePath ? "image" : "text",
-      src: visualAsset?.filePath || "",
-      dataUrl: visualPreview
-    },
+    { label: "素材", value: summarizeCandidates(candidates), kind: "candidate-list" },
     { label: "描述", value: metadata.summary.replace(/\n/g, " "), kind: "longtext" },
     { label: "链接", value: payload.url, kind: "url" }
   ];
@@ -144,6 +142,174 @@ function buildBearPreviewFields(payload, metadata, visualAsset, visualPreview) {
 async function buildDataUrlPreview(asset) {
   const base64 = await fs.readFile(asset.filePath, "base64");
   return `data:${asset.mimeType || "image/jpeg"};base64,${base64}`;
+}
+
+async function buildBearCandidates(payload, metadata) {
+  const candidates = [];
+  if (isTwitterUrl(payload.url)) {
+    const hasVideo = await hasTwitterDownloadableVideo(payload.url).catch(() => false);
+    if (hasVideo) {
+      const thumbnail = await buildTwitterPreviewThumbnailForBear(payload, metadata).catch(() => null);
+      candidates.push(makeCandidate({
+        kind: "twitter-gif",
+        sourceType: "twitter",
+        mediaUrl: payload.url,
+        poster: "",
+        thumbnail: thumbnail || null,
+        selected: true,
+        label: "X 视频转 GIF",
+        id: `bear-twitter-gif:${safeShellName(payload.url)}`
+      }));
+    }
+  }
+
+  const imageSourceType = isTwitterUrl(payload.url) ? "twitter" : isXiaohongshuUrl(payload.url) ? "xiaohongshu" : "webpage";
+  const imageCandidates = buildContentImageCandidates(payload, imageSourceType, {
+    selectedFirst: !candidates.some((candidate) => candidate.selected),
+    labelPrefix: isXiaohongshuUrl(payload.url) ? "小红书图片" : "内容图片"
+  });
+  candidates.push(...imageCandidates.slice(0, 8));
+
+  if (payload.screenshotDataUrl) {
+    const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "bear-screenshot", "jpg");
+    const compactScreenshot = screenshot ? await compactImageForBear(screenshot).catch(() => null) : null;
+    if (compactScreenshot) {
+      candidates.push(makeCandidate({
+        kind: "screenshot",
+        sourceType: "browser",
+        asset: compactScreenshot,
+        selected: !candidates.some((candidate) => candidate.selected),
+        label: "当前截图"
+      }));
+    }
+  }
+
+  if (!candidates.some((candidate) => candidate.selected) && candidates.length) candidates[0].selected = true;
+  return candidates;
+}
+
+function buildContentImageCandidates(payload, sourceType, options = {}) {
+  const seen = new Set();
+  const images = [
+    payload.pageMeta?.image ? { src: payload.pageMeta.image, alt: `${options.labelPrefix || "内容图片"} 1`, width: 0, height: 0 } : null,
+    ...(payload.pageAssets?.images || [])
+  ].filter(Boolean)
+    .filter((image) => sourceType !== "twitter" || image.tweetScope === "primary");
+
+  return images
+    .map((image, index) => {
+      const src = normalizeContentImageUrl(image.src || "", sourceType);
+      if (!src || seen.has(src)) return null;
+      seen.add(src);
+      return makeCandidate({
+        kind: "asset-url",
+        sourceType,
+        assetUrl: src,
+        selected: Boolean(options.selectedFirst && index === 0),
+        label: image.alt || `${options.labelPrefix || "内容图片"} ${index + 1}`,
+        id: `bear-content-image:${index + 1}:${safeShellName(src)}`,
+        width: image.width || 0,
+        height: image.height || 0
+      });
+    })
+    .filter(Boolean);
+}
+
+function normalizeContentImageUrl(url, sourceType) {
+  const text = String(url || "").trim();
+  if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
+  try {
+    const parsed = new URL(text);
+    if (sourceType === "twitter" && isTwitterDefaultOgImage(parsed)) return "";
+    if (sourceType === "xiaohongshu") {
+      for (const key of [...parsed.searchParams.keys()]) {
+        if (["imageView2", "format", "x-oss-process"].includes(key) || key.startsWith("image")) {
+          parsed.searchParams.delete(key);
+        }
+      }
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return text;
+  }
+}
+
+function isTwitterDefaultOgImage(parsedUrl) {
+  return parsedUrl.hostname === "abs.twimg.com"
+    && /^\/rweb\/ssr\/default\/v\d+\/og\/image\.png$/i.test(parsedUrl.pathname);
+}
+
+function makeCandidate(candidate) {
+  const filename = candidate.asset?.filename || candidate.assetUrl || candidate.mediaUrl || candidate.kind;
+  return {
+    id: candidate.id || `${candidate.kind}:${safeShellName(filename)}`,
+    ...candidate
+  };
+}
+
+function summarizeCandidates(candidates = []) {
+  return candidates.map((candidate) => ({
+    id: candidate.id || "",
+    kind: candidate.kind,
+    sourceType: candidate.sourceType || "",
+    filename: candidate.asset?.filename || candidate.filename || "",
+    filePath: candidate.asset?.filePath || candidate.filePath || "",
+    size: candidate.asset?.size || candidate.size || 0,
+    assetUrl: candidate.assetUrl || "",
+    mediaUrl: candidate.mediaUrl || "",
+    poster: candidate.poster || "",
+    thumbnailPath: candidate.thumbnail?.filePath || candidate.thumbnailPath || "",
+    thumbnailFilename: candidate.thumbnail?.filename || candidate.thumbnailFilename || "",
+    label: candidate.label || bearCandidateLabel(candidate),
+    selected: Boolean(candidate.selected),
+    width: candidate.width || 0,
+    height: candidate.height || 0
+  }));
+}
+
+function bearCandidateLabel(candidate) {
+  if (candidate.kind === "twitter-gif") return "X 视频转 GIF";
+  if (candidate.kind === "screenshot") return "当前截图";
+  if (candidate.kind === "asset-url") return candidate.sourceType === "xiaohongshu" ? "小红书图片" : "内容图片";
+  return "素材";
+}
+
+async function resolveSelectedBearAssets(task, options = {}) {
+  const result = task.results?.bear;
+  const candidates = result?.writePlan?.candidates || [];
+  const selectedIds = new Set((Array.isArray(options.candidateIds) ? options.candidateIds : []).filter(Boolean));
+  const selectedCandidates = selectedIds.size
+    ? candidates.filter((candidate) => selectedIds.has(candidate.id))
+    : candidates.filter((candidate) => candidate.selected);
+  const selected = selectedCandidates.length ? selectedCandidates : candidates.slice(0, 1);
+  const assets = [];
+  for (const candidate of selected) {
+    const asset = await resolveBearCandidateAsset(candidate, task.payload, result.metadata || {});
+    if (asset) assets.push(asset);
+  }
+  return assets;
+}
+
+async function resolveBearCandidateAsset(candidate, payload, metadata) {
+  if (candidate.kind === "twitter-gif") {
+    return buildTwitterGifForBear(payload, metadata);
+  }
+  if (candidate.kind === "screenshot" && candidate.asset?.filePath) {
+    return {
+      ...candidate.asset,
+      kind: "screenshot",
+      label: candidate.label || "截图"
+    };
+  }
+  if (candidate.kind === "asset-url" && candidate.assetUrl) {
+    const asset = await downloadRemoteAssetForBear(candidate.assetUrl, metadata, candidate.sourceType);
+    return {
+      ...asset,
+      kind: "image",
+      label: candidate.label || "图片"
+    };
+  }
+  return null;
 }
 
 async function appendToBear(markdown) {
@@ -231,6 +397,60 @@ async function compactImageForBear(asset) {
   };
 }
 
+async function downloadRemoteAssetForBear(assetUrl, metadata, sourceType = "asset") {
+  if (!assetUrl) throw new Error("远程素材 URL 为空");
+  const response = await fetch(assetUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 Chrome Clip Router",
+      Referer: sourceType === "xiaohongshu" ? "https://www.xiaohongshu.com/" : undefined
+    }
+  });
+  if (!response.ok) throw new Error(`远程素材下载失败：${response.status}`);
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length) throw new Error("远程素材内容为空");
+
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const contentType = response.headers.get("content-type") || "";
+  const ext = extensionFromContentType(contentType) || extensionFromUrl(assetUrl) || "jpg";
+  const rawPath = path.join(dir, `${Date.now()}-${safeShellName(metadata.titleZh || sourceType)}-${Math.random().toString(16).slice(2, 8)}.${ext}`);
+  await fs.writeFile(rawPath, buffer);
+  const compact = await compactImageForBear({
+    filePath: rawPath,
+    filename: path.basename(rawPath),
+    mimeType: contentType,
+    size: buffer.length
+  }).catch(() => null);
+  return compact || {
+    filePath: rawPath,
+    filename: path.basename(rawPath),
+    mimeType: contentType,
+    size: buffer.length
+  };
+}
+
+function extensionFromContentType(contentType) {
+  const type = String(contentType || "").split(";")[0].trim().toLowerCase();
+  const map = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif"
+  };
+  return map[type] || "";
+}
+
+function extensionFromUrl(assetUrl) {
+  try {
+    const ext = path.extname(new URL(assetUrl).pathname).replace(".", "").toLowerCase();
+    return ["jpg", "jpeg", "png", "webp", "gif"].includes(ext) ? ext : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
 async function buildTwitterGifForBear(payload, metadata) {
   const media = await downloadTwitterVideo(payload.url, metadata);
   const gif = await convertVideoToGif(media.filePath, metadata);
@@ -240,6 +460,158 @@ async function buildTwitterGifForBear(payload, metadata) {
     label: "GIF",
     sourceVideo: media.filePath
   };
+}
+
+async function buildTwitterPreviewThumbnailForBear(payload, metadata) {
+  const cropped = await cropVideoFrameFromScreenshot(payload, metadata).catch(() => null);
+  if (cropped?.filePath) return cropped;
+
+  const downloaded = await captureTwitterDownloadedFrameForBear(payload, metadata).catch(() => null);
+  if (downloaded?.filePath) return downloaded;
+
+  if (payload.screenshotDataUrl) {
+    const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "twitter-video-frame", "png");
+    if (screenshot?.filePath) {
+      return {
+        ...screenshot,
+        source: "visible-tab-screenshot"
+      };
+    }
+  }
+
+  return captureTwitterThumbnailForBear(payload.url, metadata).catch(() => null);
+}
+
+async function captureTwitterDownloadedFrameForBear(payload, metadata) {
+  const media = await withTimeout(
+    downloadTwitterVideo(payload.url, metadata),
+    18000,
+    "X/Twitter 视频首帧下载超时"
+  );
+  const thumbnail = await captureVideoThumbnail(media.filePath, metadata.titleZh || payload.title || "twitter-video");
+  return {
+    ...thumbnail,
+    source: "yt-dlp-video-first-frame",
+    mediaFilePath: media.filePath
+  };
+}
+
+async function cropVideoFrameFromScreenshot(payload, metadata) {
+  const rect = selectVideoRect(payload.pageAssets?.videoRects);
+  if (!rect || !payload.screenshotDataUrl) return null;
+
+  const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "twitter-visible-page", "png");
+  if (!screenshot?.filePath) return null;
+
+  const viewport = payload.pageAssets?.viewport || {};
+  const dpr = Number(viewport.devicePixelRatio || 1) || 1;
+  const imageSize = await getImageSize(screenshot.filePath).catch(() => null);
+  const crop = normalizeCropRect(rect, dpr, imageSize);
+  if (!crop) return null;
+
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `clip-router-bear-video-frame-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.jpg`);
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-i", screenshot.filePath,
+    "-vf", `crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`,
+    "-frames:v", "1",
+    "-q:v", "3",
+    filePath
+  ], { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
+
+  return {
+    filePath,
+    filename: path.basename(filePath),
+    mimeType: "image/jpeg",
+    size: await fileSize(filePath),
+    source: "visible-video-crop",
+    rect: crop
+  };
+}
+
+function selectVideoRect(rects) {
+  return (Array.isArray(rects) ? rects : [])
+    .map((rect) => ({
+      x: Number(rect.x || 0),
+      y: Number(rect.y || 0),
+      width: Number(rect.width || 0),
+      height: Number(rect.height || 0)
+    }))
+    .filter((rect) => rect.width >= 120 && rect.height >= 80)
+    .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
+}
+
+async function getImageSize(filePath) {
+  const { stdout } = await execFileAsync("ffprobe", [
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height",
+    "-of", "csv=p=0:s=x",
+    filePath
+  ], { timeout: 5000, maxBuffer: 1024 * 32 });
+  const [width, height] = stdout.trim().split("x").map((value) => Number(value || 0));
+  return width && height ? { width, height } : null;
+}
+
+function normalizeCropRect(rect, dpr, imageSize = null) {
+  const x = Math.max(0, Math.round(rect.x * dpr));
+  const y = Math.max(0, Math.round(rect.y * dpr));
+  let width = Math.max(0, Math.round(rect.width * dpr));
+  let height = Math.max(0, Math.round(rect.height * dpr));
+  if (imageSize?.width && imageSize?.height) {
+    width = Math.min(width, Math.max(0, imageSize.width - x));
+    height = Math.min(height, Math.max(0, imageSize.height - y));
+  }
+  if (width < 120 || height < 80) return null;
+  return {
+    x,
+    y,
+    width: width % 2 === 0 ? width : width - 1,
+    height: height % 2 === 0 ? height : height - 1
+  };
+}
+
+async function captureTwitterThumbnailForBear(url, metadata) {
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const outputTemplate = path.join(dir, `clip-router-bear-thumb-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.%(ext)s`);
+  const args = [
+    "--no-playlist",
+    "--skip-download",
+    "--write-thumbnail",
+    "--convert-thumbnails",
+    "jpg",
+    "-o",
+    outputTemplate,
+    "--print",
+    "thumbnail",
+    url
+  ];
+  await execFileAsync("yt-dlp", args, { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
+  const files = await fs.readdir(dir);
+  const prefix = path.basename(outputTemplate).replace("%(ext)s", "");
+  const file = files
+    .filter((name) => name.startsWith(prefix) && /\.(jpg|jpeg|png|webp)$/i.test(name))
+    .sort()
+    .at(-1);
+  if (!file) throw new Error("yt-dlp 未返回视频缩略图");
+  const filePath = path.join(dir, file);
+  return {
+    filePath,
+    filename: file,
+    mimeType: contentTypeForImagePath(filePath),
+    size: await fileSize(filePath),
+    source: "yt-dlp-thumbnail"
+  };
+}
+
+function contentTypeForImagePath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  return "image/jpeg";
 }
 
 async function downloadTwitterVideo(url, metadata) {
@@ -260,6 +632,40 @@ async function downloadTwitterVideo(url, metadata) {
   const filePath = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
   if (!filePath) throw new Error("yt-dlp 未返回 X 视频路径");
   return { filePath, filename: path.basename(filePath) };
+}
+
+async function captureVideoThumbnail(videoUrl, baseName = "video") {
+  if (!videoUrl) throw new Error("视频 URL 为空");
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `clip-router-bear-frame-${Date.now()}-${safeShellName(baseName)}.jpg`);
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-ss", "0",
+    "-i", videoUrl,
+    "-frames:v", "1",
+    "-q:v", "3",
+    filePath
+  ], { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
+  return {
+    filePath,
+    filename: path.basename(filePath),
+    mimeType: "image/jpeg",
+    size: await fileSize(filePath),
+    source: "ffmpeg-first-frame"
+  };
+}
+
+async function hasTwitterDownloadableVideo(url) {
+  const { stdout } = await execFileAsync("yt-dlp", [
+    "--no-playlist",
+    "--skip-download",
+    "--print",
+    "%(url)s",
+    url
+  ], { timeout: 15000, maxBuffer: 1024 * 1024 });
+  return /\.(mp4|m4v|mov|webm)(?:[?#]|$)/i.test(stdout)
+    || /video|amplify_video|tweet_video|m3u8/i.test(stdout);
 }
 
 async function convertVideoToGif(videoPath, metadata) {
@@ -302,8 +708,22 @@ function isTwitterUrl(url) {
   return host === "x.com" || host === "twitter.com" || host.endsWith(".x.com") || host.endsWith(".twitter.com");
 }
 
+function isXiaohongshuUrl(url) {
+  const host = hostnameFromUrl(url);
+  return host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com");
+}
+
 function safeShellName(value) {
   return String(value || "asset").replace(/[^\w.-]+/g, "-").slice(0, 60) || "asset";
+}
+
+async function fileSize(filePath) {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.size;
+  } catch (_error) {
+    return 0;
+  }
 }
 
 async function revealBear() {
@@ -321,11 +741,13 @@ async function verifyBearUrl(url, imageFilename = "") {
   }
 
   const escaped = escapeSqlLike(url);
-  const escapedImage = imageFilename ? escapeSqlLike(imageFilename) : "";
+  const imageFilenames = Array.isArray(imageFilename) ? imageFilename.filter(Boolean) : [imageFilename].filter(Boolean);
   const readableDbPath = await copyDbForRead(dbPath);
   const countSql = `SELECT COUNT(*) AS count FROM ZSFNOTE WHERE ZTEXT LIKE '%${escaped}%';`;
   const matchSql = `SELECT ZTITLE AS title, substr(ZTEXT, max(length(ZTEXT)-1000, 1), 1000) AS tail FROM ZSFNOTE WHERE ZTEXT LIKE '%${escaped}%' LIMIT 3;`;
-  const imageSql = escapedImage ? `SELECT COUNT(*) AS count FROM ZSFNOTE WHERE ZTEXT LIKE '%${escapedImage}%';` : "SELECT 0 AS count;";
+  const imageSql = imageFilenames.length
+    ? `SELECT ${imageFilenames.map((filename) => `(CASE WHEN ZTEXT LIKE '%${escapeSqlLike(filename)}%' THEN 1 ELSE 0 END)`).join(" + ")} AS count FROM ZSFNOTE WHERE ZTEXT LIKE '%${escaped}%' ORDER BY ZMODIFICATIONDATE DESC LIMIT 1;`
+    : "SELECT 0 AS count;";
   const countRows = await sqliteJson(readableDbPath, countSql);
   const noteRows = await sqliteJson(readableDbPath, matchSql);
   const imageRows = await sqliteJson(readableDbPath, imageSql);

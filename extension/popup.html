@@ -9,15 +9,14 @@
   <body>
     <main class="shell" data-state="idle">
       <header class="page-head">
-        <div class="page-icon" aria-hidden="true">⌘</div>
+        <div class="page-icon" aria-hidden="true"><img src="icons/sf-symbols/square-grid-2x2.png" alt=""></div>
         <div class="page-copy">
-          <p class="eyebrow">当前页面</p>
+          <p class="eyebrow">Background clipper</p>
           <h1 id="title">读取中...</h1>
           <p id="url" class="url"></p>
         </div>
         <button id="settingsButton" class="settings-button" type="button" aria-label="打开插件设置">
-          <span aria-hidden="true">⚙</span>
-          <span>设置</span>
+          <img class="settings-icon" src="icons/sf-symbols/gearshape.png" alt="" aria-hidden="true">
         </button>
       </header>
 
@@ -29,7 +28,10 @@
               <strong>Eagle</strong>
               <small>素材、截图、网页快照</small>
             </span>
-            <span class="channel-status" data-role="status">未生成</span>
+            <span class="channel-meta">
+              <span class="channel-status" data-role="status">未生成</span>
+              <span class="channel-chevron" aria-hidden="true"></span>
+            </span>
           </button>
           <div class="channel-body">
             <label class="field">
@@ -61,10 +63,20 @@
               <strong>Bear</strong>
               <small>阅读笔记条目</small>
             </span>
-            <span class="channel-status" data-role="status">未生成</span>
+            <span class="channel-meta">
+              <span class="channel-status" data-role="status">未生成</span>
+              <span class="channel-chevron" aria-hidden="true"></span>
+            </span>
           </button>
           <div class="channel-body">
             <div class="inline-state" data-role="inline-state">展开后自动生成预览。</div>
+            <section class="candidate-panel" data-role="candidates" aria-label="Bear 待写入素材">
+              <div class="candidate-head">
+                <strong>待写入素材</strong>
+                <span>生成后可勾选</span>
+              </div>
+              <div class="candidate-list candidate-list-empty">展开后展示截图、页面图片和可转换视频。</div>
+            </section>
             <div class="preview field-preview" data-role="preview"></div>
             <div class="channel-actions">
               <label class="switch-row switch-row-compact">
@@ -86,7 +98,10 @@
               <strong>Obsidian</strong>
               <small>Web Clipper 风格 Markdown</small>
             </span>
-            <span class="channel-status" data-role="status">未生成</span>
+            <span class="channel-meta">
+              <span class="channel-status" data-role="status">未生成</span>
+              <span class="channel-chevron" aria-hidden="true"></span>
+            </span>
           </button>
           <div class="channel-body">
             <label class="field">

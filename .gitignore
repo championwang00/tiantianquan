@@ -2,3 +2,4 @@ node_modules/
 server/.env
 *.log
 .DS_Store
+.codex_*.png

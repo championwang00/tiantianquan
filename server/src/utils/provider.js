@@ -7,10 +7,19 @@ const OPENCLAW_CONFIG = path.join(os.homedir(), ".openclaw", "openclaw.json");
 const PROVIDER_TIMEOUT_MS = 12000;
 
 export async function generateClipMetadata(payload, target) {
+  const isEagle = target === "eagle";
   const prompt = [
     "你是一个本地网页收藏整理器。请只输出 JSON，不要 Markdown。",
     "字段：titleZh, oneLine, summary, tags, contentType, whySaved。",
-    "要求：中文为主，tags 2-6 个，contentType 从 article/tool/design_reference/thought/video/tweet/portfolio/documentation/unknown 里选。",
+    isEagle
+      ? [
+          "Eagle 标题要求：先理解标题结构，再生成适合中文收藏库检索的中英混合标题。",
+          "保留仓库名、产品名、人名、品牌名，以及 skill、API、UI、GitHub 等约定俗成的专有词；普通英文名词和介绍性句子必须翻译成自然中文。",
+          "不要原样照抄整段英文，不要把域名或“素材参考”塞进 titleZh；titleZh 必须包含中文，oneLine 用一句中文说明它是什么。",
+          "示例：orange2ai/orange-line-illustration New Yorker-style minimalist editorial illustration skill for AI agents -> orange2ai/orange-line-illustration：面向 AI Agent 的《纽约客》风格极简编辑插画 skill。"
+        ].join("\n")
+      : "要求：中文为主，tags 2-6 个，contentType 从 article/tool/design_reference/thought/video/tweet/portfolio/documentation/unknown 里选。",
+    "tags 2-6 个，contentType 从 article/tool/design_reference/thought/video/tweet/portfolio/documentation/unknown 里选。",
     "",
     `目标：${target}`,
     `标题：${payload.title}`,

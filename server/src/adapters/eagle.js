@@ -29,12 +29,12 @@ const FOLDERS = [
 ];
 
 export async function runEagleAdapter(payload) {
-  const metadata = await generateClipMetadata(payload, "eagle");
-  const folders = await resolveFolders(payload, metadata);
+  const metadata = await buildEagleMetadata(payload);
+  const folders = resolvePreviewFolders(payload, metadata);
   const annotation = buildAnnotation(payload, metadata);
   const candidates = await buildImportCandidates(payload, metadata);
   const importPlan = candidates.find((candidate) => candidate.selected) || candidates[0];
-  const readiness = await checkEagleReadiness(payload.url);
+  const readiness = { ok: true, skipped: true };
 
   return {
     status: "needs_review",
@@ -50,6 +50,109 @@ export async function runEagleAdapter(payload) {
     writePlan: { folders, metadata, annotation, importPlan, candidates },
     readiness
   };
+}
+
+async function buildEagleMetadata(payload) {
+  const fallback = buildFastMetadata(payload);
+  try {
+    const generated = await withTimeout(
+      generateClipMetadata(payload, "eagle"),
+      8000,
+      "Eagle metadata generation timed out"
+    );
+    return mergeMetadataWithFallback(generated, fallback, payload);
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function mergeMetadataWithFallback(generated, fallback, payload) {
+  const titleZh = cleanAiTitle(generated.titleZh, payload.title) || fallback.titleZh;
+  const oneLine = cleanChineseIntro(generated.oneLine || generated.summary) || fallback.oneLine;
+  return {
+    ...fallback,
+    ...generated,
+    titleZh,
+    oneLine,
+    summary: cleanChineseIntro(generated.summary) || fallback.summary,
+    tags: Array.isArray(generated.tags) && generated.tags.length ? generated.tags.slice(0, 6) : fallback.tags,
+    whySaved: cleanChineseIntro(generated.whySaved) || fallback.whySaved
+  };
+}
+
+function cleanAiTitle(value, originalTitle = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const original = String(originalTitle || "").replace(/\s+/g, " ").trim();
+  if (!/[\u4e00-\u9fff]/.test(text) && original && text === original) return "";
+  if (!/[\u4e00-\u9fff]/.test(text) && /[a-z]{3}/i.test(text)) return "";
+  return text;
+}
+
+function cleanChineseIntro(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.slice(0, 90);
+}
+
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
+  ]);
+}
+
+function buildFastMetadata(payload) {
+  const host = hostnameFromUrl(payload.url);
+  const description = String(payload.pageMeta?.description || "").trim();
+  const title = String(payload.title || host || "网页素材").replace(/\s+/g, " ").trim();
+  const contentType = detectSourceType(payload.url) === "twitter"
+    ? "video"
+    : detectSourceType(payload.url) === "xiaohongshu"
+      ? "design_reference"
+      : "design_reference";
+  return {
+    titleZh: localizeTitleFallback(title, host),
+    oneLine: localizeIntroFallback(description, host),
+    summary: localizeIntroFallback(description, host) || buildChineseSummary(payload),
+    tags: inferFastTags(payload, contentType),
+    contentType,
+    whySaved: "作为网页、产品、设计或内容参考。"
+  };
+}
+
+function localizeTitleFallback(title, host) {
+  const cleaned = String(title || host || "网页素材").replace(/\s+/g, " ").trim();
+  if (/[\u4e00-\u9fff]/.test(cleaned)) return cleaned;
+  return `${cleaned}（${host} 素材参考）`;
+}
+
+function localizeIntroFallback(description, host) {
+  const text = String(description || "").replace(/\s+/g, " ").trim();
+  if (!text) return `${host} 上的网页素材参考`;
+  if (/[\u4e00-\u9fff]/.test(text)) return text.slice(0, 90);
+  return `来自 ${host} 的素材参考：${text.slice(0, 70)}`;
+}
+
+function inferFastTags(payload, contentType) {
+  const host = hostnameFromUrl(payload.url);
+  const tags = new Set(["网页素材"]);
+  if (contentType === "video") tags.add("视频");
+  if (host.includes("xiaohongshu")) tags.add("小红书");
+  if (host === "x.com" || host.includes("twitter")) tags.add("X");
+  if (/figma|ui|ux|interface|app|design|设计|界面/i.test(`${payload.title} ${payload.pageMeta?.description || ""}`)) tags.add("设计参考");
+  return [...tags].slice(0, 6);
+}
+
+function resolvePreviewFolders(payload, metadata = {}) {
+  const selectedIds = normalizeFolderIds(payload.options?.eagle?.folderIds || [payload.options?.eagle?.folderId].filter(Boolean));
+  if (selectedIds.length) {
+    const selected = selectedIds
+      .map((id) => FOLDERS.find((folder) => folder.id === id))
+      .filter(Boolean);
+    if (selected.length) return selected;
+  }
+  return classifyFolders(payload, metadata);
 }
 
 export async function confirmEagleWrite(task, options = {}) {
@@ -186,17 +289,24 @@ async function buildImportCandidates(payload, metadata) {
   const candidates = [];
 
   if (sourceType === "twitter") {
-    const media = await downloadTwitterMedia(payload.url, metadata).catch((error) => ({
-      kind: "download_failed",
-      reason: error.message
-    }));
-    if (media.filePath) {
-      candidates.push(makeCandidate({ kind: "media-file", sourceType, asset: media, selected: true }));
+    const hasVideo = await hasTwitterDownloadableVideo(payload.url).catch(() => false);
+    if (hasVideo) {
+      const thumbnail = await buildTwitterPreviewThumbnail(payload, metadata);
+      candidates.push(makeCandidate({
+        kind: "twitter-url",
+        sourceType,
+        mediaUrl: payload.url,
+        poster: thumbnail?.filePath ? "" : "",
+        thumbnail: thumbnail || null,
+        selected: true,
+        label: "X/Twitter 视频",
+        id: `twitter-video:${safeShellName(payload.url)}`
+      }));
     }
   }
 
   if (sourceType === "xiaohongshu") {
-    const videoCandidates = buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书视频" });
+    const videoCandidates = await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书视频" });
     candidates.push(...videoCandidates);
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
     candidates.push(...imageCandidates);
@@ -213,7 +323,7 @@ async function buildImportCandidates(payload, metadata) {
   }
 
   if (captureMode === "top-image") {
-    const assetUrl = payload.pageMeta?.image || payload.pageAssets?.images?.[0]?.src || "";
+    const assetUrl = normalizeContentImageUrl(payload.pageMeta?.image || payload.pageAssets?.images?.[0]?.src || "", sourceType);
     if (assetUrl) {
       candidates.push(makeCandidate({ kind: "asset-url", sourceType, assetUrl, selected: !hasSelectedCandidate(candidates) }));
     }
@@ -274,7 +384,8 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
   const images = [
     payload.pageMeta?.image ? { src: payload.pageMeta.image, alt: `${options.labelPrefix || "内容图片"} 1`, width: 0, height: 0 } : null,
     ...(payload.pageAssets?.images || [])
-  ].filter(Boolean);
+  ].filter(Boolean)
+    .filter((image) => sourceType !== "twitter" || image.tweetScope === "primary");
 
   return images
     .map((image, index) => {
@@ -298,7 +409,8 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
 
 function buildContentVideoCandidates(payload, sourceType, options = {}) {
   const seen = new Set();
-  return (payload.pageAssets?.videos || [])
+  const candidates = (payload.pageAssets?.videos || [])
+    .filter((video) => sourceType !== "twitter" || video.tweetScope === "primary")
     .map((video, index) => {
       const src = normalizeContentVideoUrl(video.src || "");
       if (!src || seen.has(src)) return null;
@@ -315,6 +427,121 @@ function buildContentVideoCandidates(payload, sourceType, options = {}) {
     })
     .filter(Boolean)
     .slice(0, 4);
+  return Promise.all(candidates.map(async (candidate) => {
+    if (candidate.poster) return candidate;
+    const thumbnail = await captureVideoThumbnail(candidate.mediaUrl, `${options.labelPrefix || "video"}-${candidate.id}`).catch(() => null);
+    return thumbnail?.filePath ? { ...candidate, thumbnail } : candidate;
+  }));
+}
+
+async function buildTwitterPreviewThumbnail(payload, metadata) {
+  const cropped = await cropVideoFrameFromScreenshot(payload, metadata).catch(() => null);
+  if (cropped?.filePath) return cropped;
+
+  const downloaded = await captureTwitterDownloadedFrame(payload, metadata).catch(() => null);
+  if (downloaded?.filePath) return downloaded;
+
+  if (payload.screenshotDataUrl) {
+    const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "twitter-video-frame", "png");
+    if (screenshot?.filePath) {
+      return {
+        ...screenshot,
+        source: "visible-tab-screenshot"
+      };
+    }
+  }
+  return captureTwitterThumbnail(payload.url, metadata).catch(() => null);
+}
+
+async function captureTwitterDownloadedFrame(payload, metadata) {
+  const media = await withTimeout(
+    downloadTwitterMedia(payload.url, metadata),
+    18000,
+    "X/Twitter 视频首帧下载超时"
+  );
+  const thumbnail = await captureVideoThumbnail(media.filePath, metadata.titleZh || payload.title || "twitter-video");
+  return {
+    ...thumbnail,
+    source: "yt-dlp-video-first-frame",
+    mediaFilePath: media.filePath
+  };
+}
+
+async function cropVideoFrameFromScreenshot(payload, metadata) {
+  const rect = selectVideoRect(payload.pageAssets?.videoRects);
+  if (!rect || !payload.screenshotDataUrl) return null;
+
+  const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "twitter-visible-page", "png");
+  if (!screenshot?.filePath) return null;
+
+  const viewport = payload.pageAssets?.viewport || {};
+  const dpr = Number(viewport.devicePixelRatio || 1) || 1;
+  const imageSize = await getImageSize(screenshot.filePath).catch(() => null);
+  const crop = normalizeCropRect(rect, dpr, imageSize);
+  if (!crop) return null;
+
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `clip-router-video-frame-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.jpg`);
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-i", screenshot.filePath,
+    "-vf", `crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`,
+    "-frames:v", "1",
+    "-q:v", "3",
+    filePath
+  ], { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
+
+  return {
+    filePath,
+    filename: path.basename(filePath),
+    mimeType: "image/jpeg",
+    size: await fileSize(filePath),
+    source: "visible-video-crop",
+    rect: crop
+  };
+}
+
+function selectVideoRect(rects) {
+  return (Array.isArray(rects) ? rects : [])
+    .map((rect) => ({
+      x: Number(rect.x || 0),
+      y: Number(rect.y || 0),
+      width: Number(rect.width || 0),
+      height: Number(rect.height || 0)
+    }))
+    .filter((rect) => rect.width >= 120 && rect.height >= 80)
+    .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
+}
+
+async function getImageSize(filePath) {
+  const { stdout } = await execFileAsync("ffprobe", [
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height",
+    "-of", "csv=p=0:s=x",
+    filePath
+  ], { timeout: 5000, maxBuffer: 1024 * 32 });
+  const [width, height] = stdout.trim().split("x").map((value) => Number(value || 0));
+  return width && height ? { width, height } : null;
+}
+
+function normalizeCropRect(rect, dpr, imageSize = null) {
+  const x = Math.max(0, Math.round(rect.x * dpr));
+  const y = Math.max(0, Math.round(rect.y * dpr));
+  let width = Math.max(0, Math.round(rect.width * dpr));
+  let height = Math.max(0, Math.round(rect.height * dpr));
+  if (imageSize?.width && imageSize?.height) {
+    width = Math.min(width, Math.max(0, imageSize.width - x));
+    height = Math.min(height, Math.max(0, imageSize.height - y));
+  }
+  if (width < 120 || height < 80) return null;
+  return {
+    x,
+    y,
+    width: width % 2 === 0 ? width : width - 1,
+    height: height % 2 === 0 ? height : height - 1
+  };
 }
 
 function normalizeContentVideoUrl(url) {
@@ -332,6 +559,7 @@ function normalizeContentImageUrl(url, sourceType) {
   if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
   try {
     const parsed = new URL(text);
+    if (sourceType === "twitter" && isTwitterDefaultOgImage(parsed)) return "";
     if (sourceType === "xiaohongshu") {
       for (const key of [...parsed.searchParams.keys()]) {
         if (["imageView2", "format", "x-oss-process"].includes(key) || key.startsWith("image")) {
@@ -343,6 +571,11 @@ function normalizeContentImageUrl(url, sourceType) {
   } catch (_error) {
     return text;
   }
+}
+
+function isTwitterDefaultOgImage(parsedUrl) {
+  return parsedUrl.hostname === "abs.twimg.com"
+    && /^\/rweb\/ssr\/default\/v\d+\/og\/image\.png$/i.test(parsedUrl.pathname);
 }
 
 async function downloadTwitterMedia(url, metadata) {
@@ -370,6 +603,24 @@ async function downloadTwitterMedia(url, metadata) {
   };
 }
 
+async function hasTwitterDownloadableVideo(url) {
+  const { stdout } = await execFileAsync("yt-dlp", [
+    "--no-playlist",
+    "--skip-download",
+    "--print",
+    "%(duration)s|%(ext)s|%(format_id)s|%(protocol)s|%(url)s",
+    url
+  ], { timeout: 15000, maxBuffer: 1024 * 1024 });
+  const text = stdout.trim();
+  if (!text) return false;
+  const [duration, ext, formatId, protocol, mediaUrl] = text.split("|");
+  return Number(duration) > 0
+    || /^(mp4|m4v|mov|webm)$/i.test(ext || "")
+    || /video|hls|dash|m3u8/i.test(`${formatId || ""} ${protocol || ""}`)
+    || /\.(mp4|m4v|mov|webm)(?:[?#]|$)/i.test(mediaUrl || "")
+    || /video|amplify_video|tweet_video|m3u8/i.test(mediaUrl || "");
+}
+
 async function downloadMediaUrl(mediaUrl, metadata, sourceType = "media") {
   const outputTemplate = path.join(os.tmpdir(), `clip-router-eagle-${Date.now()}-${safeShellName(metadata.titleZh || `${sourceType}-media`)}.%(ext)s`);
   const args = [
@@ -395,7 +646,75 @@ async function downloadMediaUrl(mediaUrl, metadata, sourceType = "media") {
   };
 }
 
+async function captureTwitterThumbnail(url, metadata) {
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const outputTemplate = path.join(dir, `clip-router-thumb-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.%(ext)s`);
+  const args = [
+    "--no-playlist",
+    "--skip-download",
+    "--write-thumbnail",
+    "--convert-thumbnails",
+    "jpg",
+    "-o",
+    outputTemplate,
+    "--print",
+    "thumbnail",
+    url
+  ];
+  await execFileAsync("yt-dlp", args, { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
+  const files = await fs.readdir(dir);
+  const prefix = path.basename(outputTemplate).replace("%(ext)s", "");
+  const file = files
+    .filter((name) => name.startsWith(prefix) && /\.(jpg|jpeg|png|webp)$/i.test(name))
+    .sort()
+    .at(-1);
+  if (!file) throw new Error("yt-dlp 未返回视频缩略图");
+  const filePath = path.join(dir, file);
+  return {
+    filePath,
+    filename: file,
+    mimeType: contentTypeForImagePath(filePath),
+    size: await fileSize(filePath),
+    source: "yt-dlp-thumbnail"
+  };
+}
+
+async function captureVideoThumbnail(videoUrl, baseName = "video") {
+  if (!videoUrl) throw new Error("视频 URL 为空");
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `clip-router-frame-${Date.now()}-${safeShellName(baseName)}.jpg`);
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-ss", "0",
+    "-i", videoUrl,
+    "-frames:v", "1",
+    "-q:v", "3",
+    filePath
+  ], { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
+  return {
+    filePath,
+    filename: path.basename(filePath),
+    mimeType: "image/jpeg",
+    size: await fileSize(filePath),
+    source: "ffmpeg-first-frame"
+  };
+}
+
+function contentTypeForImagePath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  return "image/jpeg";
+}
+
 async function importToEagle(importPlan, payload, metadata, folders, annotation) {
+  if (importPlan.kind === "twitter-url") {
+    const asset = await downloadTwitterMedia(payload.url, metadata);
+    importPlan.asset = asset;
+    return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
+  }
   if (importPlan.kind === "media-url") {
     const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType);
     importPlan.asset = asset;
@@ -546,6 +865,8 @@ function summarizeImportPlan(importPlan) {
     assetUrl: importPlan.assetUrl || "",
     mediaUrl: importPlan.mediaUrl || "",
     poster: importPlan.poster || "",
+    thumbnailPath: importPlan.thumbnail?.filePath || importPlan.thumbnailPath || "",
+    thumbnailFilename: importPlan.thumbnail?.filename || importPlan.thumbnailFilename || "",
     width: importPlan.width || 0,
     height: importPlan.height || 0,
     reason: importPlan.reason || ""
@@ -557,7 +878,7 @@ function summarizeCandidates(candidates) {
     ...summarizeImportPlan(candidate),
     label: importPlanLabel(candidate),
     selected: Boolean(candidate.selected),
-    downloadable: ["media-file", "screenshot", "html-snapshot"].includes(candidate.kind)
+    downloadable: ["media-file", "twitter-url", "screenshot", "html-snapshot"].includes(candidate.kind)
   }));
 }
 
@@ -589,6 +910,7 @@ function buildEaglePreviewFields(payload, metadata, folders, annotation, importP
 }
 
 function importPlanLabel(importPlan) {
+  if (importPlan.kind === "twitter-url") return "X/Twitter 视频";
   if (importPlan.kind === "media-file") return `媒体文件 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "media-url" && importPlan.sourceType === "xiaohongshu") return `小红书视频 ${importPlan.mediaUrl || ""}`.trim();
   if (importPlan.kind === "media-url") return `页面视频 ${importPlan.mediaUrl || ""}`.trim();
@@ -649,12 +971,12 @@ async function resolveImportedItem(response, beforeIds, payload, importPlan, met
     if (exact) return exact;
   }
 
-  if (["media-file", "media-url", "asset-url"].includes(importPlan.kind)) {
+  if (["media-file", "twitter-url", "media-url", "asset-url"].includes(importPlan.kind)) {
     const media = await findExistingLocalAssetItem(payload, importPlan).catch(() => null);
     if (media) return media;
   }
 
-  if (importPlan.kind !== "media-file") {
+  if (importPlan.kind !== "media-file" && importPlan.kind !== "twitter-url") {
     const newId = await findNewItemId(beforeIds);
     if (newId) return { id: newId };
   }
@@ -729,7 +1051,7 @@ function isPlausibleImportedItem(item, payload, importPlan, metadata, folders = 
 }
 
 function isExpectedMediaItem(item, importPlan, payload) {
-  if (!item || !["media-file", "media-url"].includes(importPlan?.kind)) return false;
+  if (!item || !["media-file", "twitter-url", "media-url"].includes(importPlan?.kind)) return false;
   const itemText = JSON.stringify(item);
   const filename = importPlan.asset?.filename || "";
   const expectedSize = Number(importPlan.asset?.size || 0);
@@ -740,7 +1062,7 @@ function isExpectedMediaItem(item, importPlan, payload) {
     || (filename && itemText.includes(filename))
     || (importPlan.mediaUrl && itemText.includes(importPlan.mediaUrl));
   const sizeOk = expectedSize > 0 && itemSize > 0 && Math.abs(itemSize - expectedSize) < Math.max(8192, expectedSize * 0.05);
-  return extOk && (sourceOk || sizeOk || importPlan.kind === "media-url");
+  return extOk && (sourceOk || sizeOk || importPlan.kind === "media-url" || importPlan.kind === "twitter-url");
 }
 
 function isExpectedLocalAssetItem(item, importPlan, payload) {
@@ -776,6 +1098,15 @@ function buildImportPreviewField(importPlan) {
       kind: "video",
       src: importPlan.asset?.filePath || "",
       size: importPlan.asset?.size || 0
+    };
+  }
+  if (importPlan.kind === "twitter-url") {
+    return {
+      label,
+      value: "确认收录时下载 X/Twitter 视频",
+      kind: "remote-video",
+      src: "",
+      poster: importPlan.poster || ""
     };
   }
   if (importPlan.kind === "media-url") {

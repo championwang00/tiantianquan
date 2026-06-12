@@ -1,4 +1,8 @@
 const ROUTER_ENDPOINT = "http://127.0.0.1:18791";
+const ROUTER_ENDPOINT_FALLBACKS = [
+  "http://127.0.0.1:18791",
+  "http://localhost:18791"
+];
 
 async function getRouterConfig() {
   const defaultToken = typeof DEFAULT_ROUTER_TOKEN === "string" ? DEFAULT_ROUTER_TOKEN : "";
@@ -51,8 +55,8 @@ async function confirmEagle(taskId, folderIds = [], candidateIds = []) {
   return confirmTarget(taskId, "eagle", { folderIds, candidateIds });
 }
 
-async function confirmBear(taskId, draft, includeScreenshot = true) {
-  return confirmTarget(taskId, "bear", { draft, includeScreenshot });
+async function confirmBear(taskId, draft, includeScreenshot = true, candidateIds = []) {
+  return confirmTarget(taskId, "bear", { draft, includeScreenshot, candidateIds });
 }
 
 async function confirmObsidian(taskId) {
@@ -71,33 +75,47 @@ async function confirmTarget(taskId, target, body) {
 }
 
 async function fetchRouter(path, config, options = {}) {
+  const errors = [];
   try {
-    let response = await fetch(`${ROUTER_ENDPOINT}${path}`, {
+    let response = await fetchWithEndpoint(ROUTER_ENDPOINT, path, config, options);
+    if (response.status === 401) {
+      config.routerToken = await bootstrapRouterToken();
+      response = await fetchWithEndpoint(ROUTER_ENDPOINT, path, config, options);
+    }
+    return response;
+  } catch (error) {
+    errors.push(`${ROUTER_ENDPOINT}: ${error.message}`);
+  }
+
+  for (const endpoint of ROUTER_ENDPOINT_FALLBACKS.filter((endpoint) => endpoint !== ROUTER_ENDPOINT)) {
+    try {
+      let response = await fetchWithEndpoint(endpoint, path, config, options);
+      if (response.status === 401) {
+        config.routerToken = await bootstrapRouterToken(endpoint);
+        response = await fetchWithEndpoint(endpoint, path, config, options);
+      }
+      return response;
+    } catch (error) {
+      errors.push(`${endpoint}: ${error.message}`);
+    }
+  }
+
+  throw new Error(`无法连接本地采集服务。请确认 Chaopi Link Router 本地服务正在运行，并刷新扩展。原始错误：${errors.join("；") || "Failed to fetch"}`);
+}
+
+async function fetchWithEndpoint(endpoint, path, config, options = {}) {
+  return fetch(`${endpoint}${path}`, {
       ...options,
       headers: {
         ...(options.headers || {}),
         Authorization: `Bearer ${config.routerToken}`
       }
     });
-    if (response.status === 401) {
-      config.routerToken = await bootstrapRouterToken();
-      response = await fetch(`${ROUTER_ENDPOINT}${path}`, {
-        ...options,
-        headers: {
-          ...(options.headers || {}),
-          Authorization: `Bearer ${config.routerToken}`
-        }
-      });
-    }
-    return response;
-  } catch (error) {
-    throw new Error(`无法连接本地采集服务。请先在 server 目录运行 npm run dev。原始错误：${error.message}`);
-  }
 }
 
-async function bootstrapRouterToken() {
+async function bootstrapRouterToken(endpoint = ROUTER_ENDPOINT) {
   try {
-    const response = await fetch(`${ROUTER_ENDPOINT}/bootstrap`);
+    const response = await fetch(`${endpoint}/bootstrap`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.routerToken) {
       throw new Error(data.error || `Router bootstrap returned ${response.status}`);

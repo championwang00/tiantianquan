@@ -14,6 +14,7 @@ const llmApiKeyInput = document.querySelector("#llmApiKey");
 const testModelButton = document.querySelector("#testModelButton");
 const modelTestStatus = document.querySelector("#modelTestStatus");
 const bearNoteIdInput = document.querySelector("#bearNoteId");
+const obsidianClipPathInput = document.querySelector("#obsidianClipPath");
 const ROUTER_ENDPOINT = "http://127.0.0.1:18791";
 const PROVIDERS = {
   openai: {
@@ -101,6 +102,7 @@ async function loadServerSettings(token) {
     llmApiKeyInput.value = settings.llmApiKeyMasked || "";
     llmApiKeyInput.placeholder = settings.llmApiKeyConfigured ? "已配置，可输入新 key 覆盖" : "填写 API key";
     bearNoteIdInput.value = settings.bearNoteId || "";
+    obsidianClipPathInput.value = settings.obsidianClipPath || "";
     applyProviderPreset(llmProviderInput.value, false);
   } catch (error) {
     statusEl.textContent = `读取本地服务配置失败：${error.message}`;
@@ -112,7 +114,8 @@ async function save() {
   await chrome.storage.sync.set({ routerToken });
   await saveServerSettings(routerToken, {
     ...getModelSettingsPayload(),
-    bearNoteId: bearNoteIdInput.value.trim()
+    bearNoteId: bearNoteIdInput.value.trim(),
+    obsidianClipPath: obsidianClipPathInput.value.trim()
   });
   llmApiKeyInput.value = "";
   await loadServerSettings(routerToken);

@@ -7,11 +7,19 @@ export function hostnameFromUrl(url) {
 }
 
 export function safeFileName(input) {
-  return String(input || "untitled")
+  const cleaned = toWellFormedText(input || "untitled")
     .replace(/[\\/:*?"<>|#%{}[\]^~`]/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80) || "untitled";
+    .trim();
+  return Array.from(cleaned).slice(0, 80).join("").trim() || "untitled";
+}
+
+function toWellFormedText(value) {
+  const text = String(value || "");
+  if (typeof text.toWellFormed === "function") return text.toWellFormed();
+  return text
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "\uFFFD")
+    .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "$1\uFFFD");
 }
 
 export function buildChineseSummary(payload) {

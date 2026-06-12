@@ -52,7 +52,7 @@ export async function confirmObsidianWrite(task) {
   }
 
   const written = await verifyObsidianFile(writePlan.filePath, task.payload.url);
-  if (written.ok) await revealObsidianFile(writePlan.filePath);
+  if (written.ok) await revealObsidianFile(writePlan.filePath, writePlan.vaultPath);
   return {
     ...result,
     status: written.ok ? "success" : "failed",
@@ -83,6 +83,7 @@ function buildJournalPlan(payload, config, metadata) {
 
   return {
     mode: "journal",
+    vaultPath: config.vaultPath,
     filePath: journalPath,
     journalDate: date,
     entry,
@@ -98,6 +99,7 @@ function buildStandalonePlan(payload, config, metadata, mode) {
 
   return {
     mode,
+    vaultPath: config.vaultPath,
     filePath,
     markdown,
     inheritedClipFolder: config.clipFolder
@@ -138,7 +140,7 @@ async function uniqueFilePath(filePath) {
 function buildStandaloneMarkdown(payload, metadata, mode) {
   const tags = metadata.tags.map((tag) => `  - ${tag}`).join("\n");
   const authors = metadata.author.values.map((author) => `  - ${author}`).join("\n");
-  const originalText = normalizeOriginalText(payload.pageContent?.markdown || payload.pageContent?.text || payload.selectedText || payload.pageMeta?.description || "");
+  const originalText = getPreferredOriginalText(payload);
   return [
     "---",
     `title: ${yamlString(metadata.titleZh)}`,
@@ -159,7 +161,7 @@ function buildStandaloneMarkdown(payload, metadata, mode) {
 }
 
 function buildObsidianPreviewFields(payload, metadata, writePlan) {
-  const body = normalizeOriginalText(payload.pageContent?.markdown || payload.pageContent?.text || payload.selectedText || "");
+  const body = getPreferredOriginalText(payload);
   return [
     { label: "title", value: metadata.titleZh, kind: "text" },
     { label: "source", value: payload.url, kind: "url" },
@@ -253,11 +255,17 @@ function buildKeyPoints(payload, contentType, generated) {
 }
 
 async function getObsidianConfig() {
-  const vaultPath = DEFAULT_VAULT;
+  const env = await import("../utils/env.js").then((mod) => mod.loadEnv());
+  const configuredPath = String(env.CLIP_ROUTER_OBSIDIAN_CLIP_PATH || "").trim();
+  const clipPath = configuredPath || path.join(DEFAULT_VAULT, "Clippings");
+  const isClipFolder = path.basename(clipPath).toLowerCase() === "clippings";
+  const vaultPath = isClipFolder ? path.dirname(clipPath) : clipPath;
+  const clipFolder = isClipFolder ? path.basename(clipPath) : "Clippings";
   return {
     vaultPath,
-    clipFolder: "Clippings",
-    source: "default"
+    clipFolder,
+    clipPath,
+    source: configuredPath ? "settings" : "default"
   };
 }
 
@@ -278,6 +286,26 @@ function normalizeOriginalText(value) {
     .replace(/\n{3,}/g, "\n\n")
     .trim()
     .slice(0, 30000);
+}
+
+function getPreferredOriginalText(payload) {
+  const text = normalizeOriginalText(payload.pageContent?.text || "");
+  const markdown = normalizeOriginalText(payload.pageContent?.markdown || "");
+  const selected = normalizeOriginalText(payload.selectedText || "");
+  const description = normalizeOriginalText(payload.pageMeta?.description || "");
+
+  if (looksTranslatedChinese(text, markdown)) return text;
+  if (markdown) return markdown;
+  return text || selected || description || "";
+}
+
+function looksTranslatedChinese(text, markdown) {
+  if (!text) return false;
+  const chineseCount = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (chineseCount < 12) return false;
+  const markdownChineseCount = (markdown.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (!markdown) return true;
+  return chineseCount > markdownChineseCount * 1.25 || chineseCount > 80;
 }
 
 function normalizeTags(tags) {
@@ -310,8 +338,25 @@ async function pathExists(filePath) {
   }
 }
 
-async function revealObsidianFile(filePath) {
+async function revealObsidianFile(filePath, vaultPath = DEFAULT_VAULT) {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
-  await promisify(execFile)("open", ["-a", "Obsidian", filePath], { timeout: 5000 }).catch(() => {});
+  const open = promisify(execFile);
+  const uri = buildObsidianOpenUri(filePath, vaultPath);
+  if (uri) {
+    await open("open", [uri], { timeout: 5000 }).catch(() => open("open", ["-a", "Obsidian", filePath], { timeout: 5000 }).catch(() => {}));
+    return;
+  }
+  await open("open", ["-a", "Obsidian", filePath], { timeout: 5000 }).catch(() => {});
+}
+
+function buildObsidianOpenUri(filePath, vaultPath) {
+  const vaultName = path.basename(vaultPath || DEFAULT_VAULT);
+  const relative = path.relative(vaultPath || DEFAULT_VAULT, filePath).replace(/\\/g, "/").replace(/\.md$/i, "");
+  if (!vaultName || relative.startsWith("..")) return "";
+  const params = new URLSearchParams({
+    vault: vaultName,
+    file: relative
+  });
+  return `obsidian://open?${params.toString()}`;
 }
