@@ -3,28 +3,27 @@ import os from "node:os";
 import path from "node:path";
 import { generateClipMetadata } from "../utils/provider.js";
 import { hostnameFromUrl, safeFileName } from "../utils/webpage.js";
-import { formatShanghaiTime, getJournalDate } from "../utils/time.js";
+import { getJournalDate } from "../utils/time.js";
 
 const DEFAULT_VAULT = path.join(
   os.homedir(),
   "Library",
   "Mobile Documents",
   "iCloud~md~obsidian",
-  "Documents",
-  "mynote"
+  "Documents"
 );
+const DEFAULT_CLIP_FOLDER = path.join("mynote", "Clippings");
+const OBSIDIAN_APP_CONFIG = path.join(os.homedir(), "Library", "Application Support", "obsidian", "obsidian.json");
 
 export async function runObsidianAdapter(payload) {
   const config = await getObsidianConfig();
   const metadata = await buildMetadata(payload);
-  const requestedMode = payload.options?.obsidian?.mode || "auto";
-  const targetMode = requestedMode === "auto" ? decideMode(payload, metadata) : requestedMode;
-  const writePlan = buildWritePlan(payload, config, metadata, targetMode);
+  const writePlan = buildWritePlan(payload, config, metadata);
 
   return {
     status: "needs_review",
     reason: "等待用户确认后再写入 Obsidian",
-    targetMode,
+    targetMode: writePlan.mode,
     path: writePlan.filePath,
     metadata,
     propertiesTypes: loadPropertiesTypes(),
@@ -41,18 +40,28 @@ export async function confirmObsidianWrite(task) {
   }
 
   const { writePlan } = result;
-  if (writePlan.mode === "journal") {
-    await ensureJournal(writePlan.filePath, writePlan.journalDate, result.metadata.tags);
-    await fs.appendFile(writePlan.filePath, `\n${writePlan.entry}\n`, "utf8");
+  await fs.mkdir(path.dirname(writePlan.filePath), { recursive: true });
+  if (await pathExists(writePlan.filePath)) {
+    const existing = await verifyObsidianFile(writePlan.filePath, task.payload.url);
+    if (!existing.ok) {
+      const filePath = await uniqueFilePath(writePlan.filePath);
+      writePlan.filePath = filePath;
+      await fs.writeFile(filePath, writePlan.markdown, "utf8");
+    }
   } else {
-    await fs.mkdir(path.dirname(writePlan.filePath), { recursive: true });
-    const filePath = await uniqueFilePath(writePlan.filePath);
-    writePlan.filePath = filePath;
-    await fs.writeFile(filePath, writePlan.markdown, "utf8");
+    await fs.writeFile(writePlan.filePath, writePlan.markdown, "utf8");
   }
 
   const written = await verifyObsidianFile(writePlan.filePath, task.payload.url);
-  if (written.ok) await revealObsidianFile(writePlan.filePath, writePlan.vaultPath);
+  if (written.ok && writePlan.reveal !== false) {
+    const currentConfig = await getObsidianConfig();
+    const revealVaultPath = resolveObsidianRevealVaultPath(
+      writePlan.filePath,
+      currentConfig.vaultPath,
+      writePlan.vaultPath
+    );
+    await revealObsidianFile(writePlan.filePath, revealVaultPath);
+  }
   return {
     ...result,
     status: written.ok ? "success" : "failed",
@@ -62,69 +71,19 @@ export async function confirmObsidianWrite(task) {
   };
 }
 
-function buildWritePlan(payload, config, metadata, targetMode) {
-  if (targetMode === "journal") {
-    return buildJournalPlan(payload, config, metadata);
-  }
-  return buildStandalonePlan(payload, config, metadata, targetMode);
-}
-
-function buildJournalPlan(payload, config, metadata) {
-  const date = getJournalDate(payload.capturedAt);
-  const journalPath = path.join(config.vaultPath, "journal", `${date}.md`);
-  const entry = [
-    `## ${formatShanghaiTime(payload.capturedAt)}`,
-    "",
-    `- [${metadata.titleZh}](${payload.url})`,
-    payload.selectedText ? `- 摘录：${payload.selectedText}` : "",
-    payload.userNote ? `- 备注：${payload.userNote}` : "",
-    `- 摘要：${metadata.summary}`
-  ].filter(Boolean).join("\n");
-
-  return {
-    mode: "journal",
-    vaultPath: config.vaultPath,
-    filePath: journalPath,
-    journalDate: date,
-    entry,
-    markdown: entry
-  };
-}
-
-function buildStandalonePlan(payload, config, metadata, mode) {
-  const folder = mode === "thought" ? "thoughts" : config.clipFolder;
+export function buildWritePlan(payload, config, metadata, _requestedMode = "clip") {
   const filename = `${safeFileName(metadata.canonicalName)}.md`;
-  const filePath = path.join(config.vaultPath, folder, filename);
-  const markdown = buildStandaloneMarkdown(payload, metadata, mode);
+  const filePath = path.join(config.vaultPath, config.clipFolder, filename);
+  const markdown = buildStandaloneMarkdown(payload, metadata);
 
   return {
-    mode,
+    mode: "clip",
     vaultPath: config.vaultPath,
+    vaultName: config.vaultName,
     filePath,
     markdown,
     inheritedClipFolder: config.clipFolder
   };
-}
-
-async function ensureJournal(filePath, date, tags) {
-  if (await pathExists(filePath)) return;
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const frontmatterTags = ["日记", ...tags.slice(0, 4)]
-    .map((tag) => `  - ${tag}`)
-    .join("\n");
-  const content = [
-    "---",
-    `date: ${date}`,
-    "tags:",
-    frontmatterTags,
-    "---",
-    "",
-    `# ${date}`,
-    ""
-  ].join("\n");
-
-  await fs.writeFile(filePath, content, "utf8");
 }
 
 async function uniqueFilePath(filePath) {
@@ -137,7 +96,7 @@ async function uniqueFilePath(filePath) {
   return path.join(parsed.dir, `${parsed.name}-${Date.now()}${parsed.ext}`);
 }
 
-function buildStandaloneMarkdown(payload, metadata, mode) {
+function buildStandaloneMarkdown(payload, metadata) {
   const tags = metadata.tags.map((tag) => `  - ${tag}`).join("\n");
   const authors = metadata.author.values.map((author) => `  - ${author}`).join("\n");
   const originalText = getPreferredOriginalText(payload);
@@ -174,12 +133,6 @@ function buildObsidianPreviewFields(payload, metadata, writePlan) {
   ];
 }
 
-function decideMode(payload, metadata) {
-  if (payload.userNote || payload.selectedText.length > 160) return "thought";
-  if (metadata.contentType === "thought") return "thought";
-  return "clip";
-}
-
 async function buildMetadata(payload) {
   const generated = await generateClipMetadata(payload, "obsidian");
   const host = hostnameFromUrl(payload.url);
@@ -203,7 +156,7 @@ async function buildMetadata(payload) {
     },
     siteName: payload.pageMeta?.siteName || host,
     contentType,
-    targetMode: "auto",
+    targetMode: "clip",
     tags,
     summary,
     keyPoints: buildKeyPoints(payload, contentType, generated),
@@ -257,16 +210,85 @@ function buildKeyPoints(payload, contentType, generated) {
 async function getObsidianConfig() {
   const env = await import("../utils/env.js").then((mod) => mod.loadEnv());
   const configuredPath = String(env.CLIP_ROUTER_OBSIDIAN_CLIP_PATH || "").trim();
-  const clipPath = configuredPath || path.join(DEFAULT_VAULT, "Clippings");
-  const isClipFolder = path.basename(clipPath).toLowerCase() === "clippings";
-  const vaultPath = isClipFolder ? path.dirname(clipPath) : clipPath;
-  const clipFolder = isClipFolder ? path.basename(clipPath) : "Clippings";
+  return resolveObsidianConfigPaths({
+    configuredPath,
+    defaultVault: DEFAULT_VAULT,
+    vaults: await readRegisteredObsidianVaults(),
+    source: configuredPath ? "settings" : "default"
+  });
+}
+
+export function resolveObsidianConfigPaths({
+  configuredPath = "",
+  defaultVault = DEFAULT_VAULT,
+  vaultRoots = [],
+  vaults = [],
+  source = configuredPath ? "settings" : "default"
+} = {}) {
+  const clipPath = path.resolve(configuredPath || path.join(defaultVault, DEFAULT_CLIP_FOLDER));
+  const normalizedVaults = normalizeObsidianVaults(vaults, vaultRoots, defaultVault)
+    .sort((a, b) => b.path.length - a.path.length);
+  const matchedVault = normalizedVaults.find((vault) => isPathInsideOrEqual(clipPath, vault.path));
+  const vaultPath = matchedVault?.path
+    || inferVaultPathFromClipPath(clipPath);
+  const relativeFolder = path.relative(vaultPath, clipPath);
+  const clipFolder = relativeFolder && !relativeFolder.startsWith("..")
+    ? relativeFolder
+    : "Clippings";
   return {
     vaultPath,
+    vaultName: matchedVault?.name || path.basename(vaultPath),
     clipFolder,
     clipPath,
-    source: configuredPath ? "settings" : "default"
+    source
   };
+}
+
+function inferVaultPathFromClipPath(clipPath) {
+  return path.basename(clipPath).toLowerCase() === "clippings" ? path.dirname(clipPath) : clipPath;
+}
+
+async function readRegisteredObsidianVaults() {
+  try {
+    const raw = await fs.readFile(OBSIDIAN_APP_CONFIG, "utf8");
+    const config = JSON.parse(raw);
+    return Object.entries(config.vaults || {})
+      .map(([id, vault]) => ({
+        id,
+        name: String(vault?.name || id || "").trim(),
+        path: String(vault?.path || "").trim()
+      }))
+      .filter((vault) => vault.path);
+  } catch (_error) {
+    return [];
+  }
+}
+
+function normalizeObsidianVaults(vaults, vaultRoots, defaultVault) {
+  const normalized = [];
+  for (const vault of vaults) {
+    const vaultPath = typeof vault === "string" ? vault : vault?.path;
+    if (!vaultPath) continue;
+    normalized.push({
+      name: typeof vault === "string" ? path.basename(vaultPath) : vault.name || vault.id || path.basename(vaultPath),
+      path: path.resolve(vaultPath)
+    });
+  }
+  for (const root of vaultRoots) {
+    if (root) normalized.push({ name: path.basename(root), path: path.resolve(root) });
+  }
+  if (defaultVault) normalized.push({ name: path.basename(defaultVault), path: path.resolve(defaultVault) });
+  const seen = new Set();
+  return normalized.filter((vault) => {
+    if (seen.has(vault.path)) return false;
+    seen.add(vault.path);
+    return true;
+  });
+}
+
+function isPathInsideOrEqual(filePath, maybeParent) {
+  const relative = path.relative(maybeParent, filePath);
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function loadPropertiesTypes() {
@@ -338,25 +360,19 @@ async function pathExists(filePath) {
   }
 }
 
-async function revealObsidianFile(filePath, vaultPath = DEFAULT_VAULT) {
+export function buildObsidianOpenUrl(filePath, vaultPath) {
+  const relativePath = path.relative(vaultPath, filePath).split(path.sep).join("/");
+  return `obsidian://open?vault=${encodeURIComponent(path.basename(vaultPath))}&file=${encodeURIComponent(relativePath)}`;
+}
+
+export function resolveObsidianRevealVaultPath(filePath, currentVaultPath, plannedVaultPath) {
+  if (currentVaultPath && isPathInsideOrEqual(filePath, currentVaultPath)) return currentVaultPath;
+  return plannedVaultPath;
+}
+
+async function revealObsidianFile(filePath, vaultPath) {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const open = promisify(execFile);
-  const uri = buildObsidianOpenUri(filePath, vaultPath);
-  if (uri) {
-    await open("open", [uri], { timeout: 5000 }).catch(() => open("open", ["-a", "Obsidian", filePath], { timeout: 5000 }).catch(() => {}));
-    return;
-  }
-  await open("open", ["-a", "Obsidian", filePath], { timeout: 5000 }).catch(() => {});
-}
-
-function buildObsidianOpenUri(filePath, vaultPath) {
-  const vaultName = path.basename(vaultPath || DEFAULT_VAULT);
-  const relative = path.relative(vaultPath || DEFAULT_VAULT, filePath).replace(/\\/g, "/").replace(/\.md$/i, "");
-  if (!vaultName || relative.startsWith("..")) return "";
-  const params = new URLSearchParams({
-    vault: vaultName,
-    file: relative
-  });
-  return `obsidian://open?${params.toString()}`;
+  await open("open", [buildObsidianOpenUrl(filePath, vaultPath)], { timeout: 5000 }).catch(() => {});
 }

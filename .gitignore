@@ -3,3 +3,4 @@ server/.env
 *.log
 .DS_Store
 .codex_*.png
+release/

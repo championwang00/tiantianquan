@@ -183,7 +183,11 @@ export async function confirmEagleWrite(task, options = {}) {
 
   const { metadata, annotation } = result.writePlan;
   const folders = selectedFolders.length ? selectedFolders : result.writePlan.folders;
-  const candidates = normalizeSelectedCandidates(result.writePlan, options.candidateIds);
+  const candidates = normalizeSelectedCandidates(
+    result.writePlan,
+    options.candidateIds,
+    task.payload.options?.eagle?.captureMode
+  );
   if (!candidates.length) {
     throw new Error("请至少勾选一个 Eagle 候选素材。");
   }
@@ -194,15 +198,21 @@ export async function confirmEagleWrite(task, options = {}) {
   const primaryFolder = folders[0];
 
   for (const candidate of candidates) {
-    const response = await importToEagle(candidate, task.payload, metadata, folders, annotation);
-    const item = await resolveImportedItem(response, activeBeforeIds, task.payload, candidate, metadata, folders);
+    const imported = await importWithFallback(candidate, {
+      payload: task.payload,
+      writePlan: result.writePlan,
+      importCandidate: (nextCandidate) => importToEagle(nextCandidate, task.payload, metadata, folders, annotation)
+    });
+    const response = imported.response;
+    const importedCandidate = imported.candidate;
+    const item = await resolveImportedItem(response, activeBeforeIds, task.payload, importedCandidate, metadata, folders);
     const itemId = item?.id || "";
     if (!itemId) {
-      throw new Error(`Eagle ${importPlanLabel(candidate)} 导入后未能验证到对应条目。`);
+      throw new Error(`Eagle ${importPlanLabel(importedCandidate)} 导入后未能验证到对应条目。`);
     }
 
     const freshItem = await waitForItemInfo(itemId);
-    if (candidate.kind === "media-file" && freshItem?.ext && !isExpectedMediaItem(freshItem, candidate, task.payload)) {
+    if (importedCandidate.kind === "media-file" && freshItem?.ext && !isExpectedMediaItem(freshItem, importedCandidate, task.payload)) {
       throw new Error(`Eagle 视频导入格式不匹配：期望 mp4 媒体文件，但验证到 ${freshItem.ext || "未知格式"}。`);
     }
 
@@ -213,15 +223,16 @@ export async function confirmEagleWrite(task, options = {}) {
 
     const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, folders, annotation);
     writtenItems.push({
-      candidateId: candidate.id,
+      candidateId: importedCandidate.id,
       itemId,
       folderId: primaryFolder?.id || "",
       folderName: primaryFolder?.name || "",
       requestedFolderIds: folders.map((folder) => folder.id),
       requestedFolderNames: folders.map((folder) => folder.name),
-      importPlan: summarizeImportPlan(candidate),
+      importPlan: summarizeImportPlan(importedCandidate),
       verification,
-      metadataUpdate
+      metadataUpdate,
+      fallbackReason: imported.fallbackReason || ""
     });
     activeBeforeIds = new Set([...activeBeforeIds, itemId]);
   }
@@ -243,6 +254,13 @@ export async function confirmEagleWrite(task, options = {}) {
     writtenAt: new Date().toISOString()
   };
 }
+
+export const __testHooks = {
+  buildImportCandidates,
+  importWithFallback,
+  selectDefaultCandidates,
+  summarizeCandidates
+};
 
 async function checkEagleReadiness(url) {
   try {
@@ -337,8 +355,58 @@ async function buildImportCandidates(payload, metadata) {
   }
 
   candidates.push(makeCandidate({ kind: "url", sourceType, selected: captureMode === "url" && !hasSelectedCandidate(candidates) }));
-  if (!hasSelectedCandidate(candidates) && candidates.length) candidates[0].selected = true;
-  return candidates;
+  return selectDefaultCandidates(candidates, captureMode);
+}
+
+function selectDefaultCandidates(candidates, captureMode = "screenshot") {
+  const preferredKind = {
+    screenshot: "screenshot",
+    "top-image": "asset-url",
+    snapshot: "html-snapshot",
+    url: "url"
+  }[captureMode];
+  const preferred = preferredKind ? candidates.find((candidate) => candidate.kind === preferredKind) : null;
+  if (preferred) {
+    return candidates.map((candidate) => ({
+      ...candidate,
+      selected: candidate === preferred
+    }));
+  }
+  if (hasSelectedCandidate(candidates)) return candidates;
+  return candidates.map((candidate, index) => ({
+    ...candidate,
+    selected: index === 0
+  }));
+}
+
+async function importWithFallback(candidate, context) {
+  try {
+    return {
+      response: await context.importCandidate(candidate),
+      candidate,
+      fallbackReason: ""
+    };
+  } catch (error) {
+    const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload);
+    if (!fallback) throw error;
+    return {
+      response: await context.importCandidate(fallback),
+      candidate: fallback,
+      fallbackReason: error.message || String(error)
+    };
+  }
+}
+
+function selectFallbackCandidate(candidate, writePlan, payload) {
+  if (!["twitter-url", "media-url"].includes(candidate?.kind)) return null;
+  const captureMode = payload?.options?.eagle?.captureMode || "screenshot";
+  const candidates = Array.isArray(writePlan?.candidates) ? writePlan.candidates : [];
+  const preferred = selectDefaultCandidates(candidates, captureMode)
+    .find((nextCandidate) => nextCandidate.selected && nextCandidate.id !== candidate.id);
+  return preferred || candidates.find((nextCandidate) => {
+    if (nextCandidate.id === candidate.id) return false;
+    return ["screenshot", "html-snapshot", "asset-url", "url"].includes(nextCandidate.kind);
+  }) || null;
 }
 
 function makeCandidate(candidate) {
@@ -922,11 +990,14 @@ function importPlanLabel(importPlan) {
   return "网页 URL 元数据";
 }
 
-function normalizeSelectedCandidates(writePlan, candidateIds = []) {
+function normalizeSelectedCandidates(writePlan, candidateIds = [], captureMode = "") {
   const candidates = Array.isArray(writePlan.candidates) && writePlan.candidates.length
     ? writePlan.candidates
     : [writePlan.importPlan].filter(Boolean);
   const selectedIds = new Set((Array.isArray(candidateIds) ? candidateIds : []).filter(Boolean));
+  if (!selectedIds.size && captureMode) {
+    return selectDefaultCandidates(candidates, captureMode).filter((candidate) => candidate.selected);
+  }
   const selected = selectedIds.size
     ? candidates.filter((candidate) => selectedIds.has(candidate.id))
     : candidates.filter((candidate) => candidate.selected);

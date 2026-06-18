@@ -12,8 +12,7 @@ async function getRouterConfig() {
     eagleCaptureMode: "screenshot",
     eagleFolderId: "",
     eagleFolderIds: [],
-    bearNoScreenshot: false,
-    obsidianMode: "auto"
+    bearNoScreenshot: false
   });
 
   if (!config.routerToken && defaultToken) {

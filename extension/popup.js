@@ -58,7 +58,6 @@ async function init() {
   }
   document.querySelector("#eagleCaptureMode").addEventListener("change", () => refreshIfOpen("eagle"));
   document.querySelector("#bearScreenshotToggle").addEventListener("change", persistCurrentOptions);
-  document.querySelector("#obsidianMode").addEventListener("change", () => refreshIfOpen("obsidian"));
   await prepareOpenTargets().catch((error) => {
     setShellState("error");
     setStatus(`生成预览失败：${error.message}`);
@@ -89,7 +88,6 @@ async function hydrateOptions() {
   routerToken = config.routerToken || "";
   document.querySelector("#eagleCaptureMode").value = config.eagleCaptureMode || "screenshot";
   document.querySelector("#bearScreenshotToggle").checked = config.bearNoScreenshot !== true;
-  document.querySelector("#obsidianMode").value = config.obsidianMode || "auto";
   hydrateEagleFolders([]).catch(() => {});
 }
 
@@ -328,7 +326,6 @@ async function buildPayload(target) {
         noScreenshot: false
       },
       obsidian: {
-        mode: getObsidianMode(),
         tags: []
       }
     },
@@ -855,8 +852,7 @@ async function persistOptions(targets) {
     eagleCaptureMode: getEagleCaptureMode(),
     eagleFolderId: "",
     eagleFolderIds: [],
-    bearNoScreenshot: !getBearIncludeScreenshot(),
-    obsidianMode: getObsidianMode()
+    bearNoScreenshot: !getBearIncludeScreenshot()
   });
 }
 
@@ -1361,10 +1357,6 @@ function candidateTitle(candidate) {
     url: "URL 书签"
   };
   return names[candidate.kind] || candidate.label || "素材";
-}
-
-function getObsidianMode() {
-  return document.querySelector("#obsidianMode")?.value || "auto";
 }
 
 function setStatus(message) {

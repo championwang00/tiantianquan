@@ -9,7 +9,8 @@ This file records the project's core synchronization decisions.
   `Authorization: Bearer <LOCAL_CLIP_ROUTER_TOKEN>`.
 - Tasks are independent per target. One target failure must not block another.
 - Bear starts as `needs_review` and returns a draft by default.
-- Obsidian defaults to `auto`, then resolves to `journal`, `thought`, or `clip`.
+- Obsidian always writes reviewed Markdown clips into the configured
+  `mynote/Clippings` folder, creating it when needed.
 - Eagle uses the local Eagle API at `http://localhost:41595` and a
   user-configured Eagle library path.
 
@@ -30,8 +31,8 @@ This file records the project's core synchronization decisions.
   writing uploads the screenshot through Bear `add-file`, removes Bear's
   automatic loose image line, writes the final entry, and verifies both URL and
   image reference through SQLite.
-- Obsidian adapter creates a reviewed write plan first. Confirmed writing uses
-  the same typed properties as the configured Web Clipper style:
+- Obsidian adapter creates a reviewed write plan first. Confirmed writing always
+  goes to `mynote/Clippings` and uses the same typed properties as the configured Web Clipper style:
   `title`, `source`, `author`, `published`, `created`, `description`, `tags`.
 
 ## Intended Next Steps

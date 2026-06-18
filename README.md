@@ -60,13 +60,13 @@ The popup now works as an accordion confirmation desk: expanding a channel
 automatically generates its preview, and one confirmation writes every expanded
 preview. Previews are field-aligned per app: Eagle shows title, description,
 link, tags, and a real Eagle folder dropdown; Bear shows title, screenshot,
-description, and link; Obsidian follows `types.json` properties plus the clipped body.
+description, and link; Obsidian writes Markdown into `mynote/Clippings` with
+typed properties plus the clipped body.
 Eagle supports
 screenshot, top image, URL, and HTML snapshot modes. Bear compresses screenshots
 before writing and opens long x-callback URLs through AppleScript to avoid macOS
-argument length limits. Obsidian
-writes the visible translated page text and image Markdown when the page DOM
-contains it.
+argument length limits. Obsidian creates the Clippings folder if needed and
+writes the visible translated page text and image Markdown when the page DOM contains it.
 
 Tasks are appended as JSONL records under:
 

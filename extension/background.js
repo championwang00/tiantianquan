@@ -119,7 +119,6 @@ async function buildPayloadForBackground(target, tab, config) {
         noScreenshot: config.bearNoScreenshot === true
       },
       obsidian: {
-        mode: config.obsidianMode || "auto",
         tags: []
       }
     },
