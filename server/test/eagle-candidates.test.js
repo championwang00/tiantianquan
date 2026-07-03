@@ -300,3 +300,35 @@ test("carousel restoration is bounded and falls back to the opposite direction",
   assert.ok(restoreNextClicks <= 30);
   assert.equal(restoreNextClicks, 1);
 });
+
+test("carousel restoration caps both directions at 30 when signatures keep changing but initial is never reached", async () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);
+  let current = "initial";
+  let discoveryPrevious = true;
+  let collectionNext = true;
+  let restorePreviousClicks = 0;
+  let fallbackNextClicks = 0;
+  await context.globalThis.traverseInstagramCarousel({
+    read: () => [{ type: "image", src: current }],
+    signature: () => current,
+    clickPrevious: () => {
+      if (discoveryPrevious) { discoveryPrevious = false; return false; }
+      restorePreviousClicks += 1;
+      current = `restore-previous-${restorePreviousClicks}`;
+      return true;
+    },
+    clickNext: () => {
+      if (collectionNext) { collectionNext = false; current = "collection-end"; return true; }
+      if (current === "collection-end") return false;
+      fallbackNextClicks += 1;
+      current = `fallback-next-${fallbackNextClicks}`;
+      return true;
+    },
+    waitForChange: async () => current,
+    maxTransitions: 30
+  });
+  assert.equal(restorePreviousClicks, 30);
+  assert.equal(fallbackNextClicks, 30);
+  assert.notEqual(current, "initial");
+});
