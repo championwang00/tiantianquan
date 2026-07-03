@@ -257,6 +257,7 @@ export async function confirmEagleWrite(task, options = {}) {
 
 export const __testHooks = {
   buildImportCandidates,
+  instagramEntryMatchesCandidate,
   importWithFallback,
   selectDefaultCandidates,
   summarizeCandidates
@@ -275,7 +276,7 @@ async function buildImportPlan(payload, metadata) {
   const sourceType = detectSourceType(payload.url);
   const captureMode = payload.options?.eagle?.captureMode || "screenshot";
   if (captureMode === "url") return { kind: "url", sourceType };
-  if (captureMode === "top-image") {
+  if (captureMode === "top-image" && !(sourceType === "instagram" && payload.pageAssets?.carousel?.length)) {
     const assetUrl = payload.pageMeta?.image || payload.pageAssets?.images?.[0]?.src || "";
     if (assetUrl) return { kind: "asset-url", sourceType, assetUrl };
   }
@@ -452,6 +453,9 @@ function detectSourceType(url) {
 
 function buildInstagramCarouselCandidates(payload) {
   const seen = new Set();
+  const shortcode = (() => {
+    try { return new URL(payload.url).pathname.match(/^\/p\/([^/]+)/)?.[1] || "post"; } catch (_error) { return "post"; }
+  })();
   return (payload.pageAssets?.carousel || []).map((asset) => {
     const index = Number(asset.index);
     const type = asset.type === "video" ? "video" : "image";
@@ -466,7 +470,7 @@ function buildInstagramCarouselCandidates(payload) {
       poster: asset.poster || "",
       selected: true,
       label: `Instagram ${type === "video" ? "视频" : "图片"} ${index + 1}`,
-      id: `instagram-carousel:${index}:${type}:${safeShellName(url)}`,
+      id: `instagram:${shortcode}:${index}:${type}`,
       carouselIndex: index,
       postUrl: payload.url,
       duration: Number(asset.duration || 0),
@@ -815,7 +819,7 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
   if (importPlan.kind === "media-url") {
     const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType).catch((error) => {
       if (importPlan.sourceType !== "instagram" || !importPlan.postUrl || !Number.isInteger(importPlan.carouselIndex)) throw error;
-      return downloadInstagramCarouselVideo(importPlan.postUrl, importPlan.carouselIndex, metadata);
+      return downloadInstagramCarouselVideo(importPlan.postUrl, importPlan, metadata);
     });
     importPlan.asset = asset;
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
@@ -834,7 +838,15 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
   return importUrlToEagle(payload, metadata, folders, annotation);
 }
 
-async function downloadInstagramCarouselVideo(postUrl, carouselIndex, metadata) {
+async function downloadInstagramCarouselVideo(postUrl, candidate, metadata) {
+  const carouselIndex = candidate.carouselIndex;
+  const { stdout: jsonText } = await execFileAsync("yt-dlp", ["--skip-download", "--dump-single-json", postUrl], { timeout: 30000, maxBuffer: 1024 * 1024 * 8 });
+  const info = JSON.parse(jsonText);
+  const entries = Array.isArray(info.entries) ? info.entries : [info];
+  const entry = entries.find((item) => Number(item?.playlist_index) === carouselIndex + 1);
+  if (!entry || !instagramEntryMatchesCandidate(entry, candidate)) {
+    throw new Error(`Instagram 第 ${carouselIndex + 1} 项无法与采集视频精确匹配`);
+  }
   const outputTemplate = path.join(os.tmpdir(), `clip-router-instagram-${carouselIndex}-${Date.now()}-${safeShellName(metadata.titleZh || "video")}.%(ext)s`);
   const { stdout } = await execFileAsync("yt-dlp", [
     "--playlist-items", String(carouselIndex + 1),
@@ -847,6 +859,14 @@ async function downloadInstagramCarouselVideo(postUrl, carouselIndex, metadata) 
   const paths = stdout.trim().split(/\r?\n/).filter(Boolean);
   if (paths.length !== 1) throw new Error(`Instagram 第 ${carouselIndex + 1} 项视频兜底未返回唯一文件`);
   return { filePath: paths[0], filename: path.basename(paths[0]), source: "yt-dlp-instagram-carousel", size: await fileSize(paths[0]) };
+}
+
+function instagramEntryMatchesCandidate(entry, candidate) {
+  if (!entry || !candidate || Number(entry.playlist_index) !== Number(candidate.carouselIndex) + 1) return false;
+  const close = (actual, expected, tolerance) => !expected || (actual && Math.abs(Number(actual) - Number(expected)) <= tolerance);
+  return close(entry.duration, candidate.duration, 1)
+    && close(entry.width, candidate.width, 4)
+    && close(entry.height, candidate.height, 4);
 }
 
 async function downloadRemoteAsset(assetUrl, metadata, sourceType = "asset") {

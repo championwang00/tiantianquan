@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { __testHooks } from "../src/adapters/eagle.js";
 
@@ -92,4 +94,39 @@ test("preserves Instagram carousel order, deduplicates media, and includes carou
   assert.deepEqual(carousel.map((candidate) => candidate.postUrl), Array(3).fill("https://www.instagram.com/p/ABC123/"));
   assert.equal(new Set(carousel.map((candidate) => candidate.id)).size, 3);
   assert.equal(carousel[1].duration, 4.2);
+  assert.deepEqual(carousel.map((candidate) => candidate.id), [
+    "instagram:ABC123:0:image",
+    "instagram:ABC123:1:video",
+    "instagram:ABC123:2:image"
+  ]);
+});
+
+test("Instagram carousel IDs do not change when signed CDN URLs rotate", async () => {
+  const payload = (token) => ({
+    url: "https://www.instagram.com/p/ABC123/?img_index=2",
+    options: { eagle: { captureMode: "top-image" } }, pageMeta: {}, pageContent: {},
+    pageAssets: { carousel: [{ index: 0, type: "image", src: `https://scontent.cdn/one.jpg?token=${token}` }] }
+  });
+  const first = await __testHooks.buildImportCandidates(payload("old"), { titleZh: "IG" });
+  const second = await __testHooks.buildImportCandidates(payload("new"), { titleZh: "IG" });
+  assert.equal(first[0].id, second[0].id);
+});
+
+test("Instagram fallback accepts only the exact playlist index and captured video metadata", () => {
+  const candidate = { carouselIndex: 3, duration: 8.2, width: 1080, height: 1920 };
+  assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, candidate), true);
+  assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 3, duration: 8.1, width: 1080, height: 1920 }, candidate), false);
+  assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 4, duration: 21, width: 1080, height: 1920 }, candidate), false);
+});
+
+test("background and popup Instagram capture keep transition, cap, restoration, and semantic scope safeguards", () => {
+  for (const relative of ["../../extension/background.js", "../../extension/popup.js"]) {
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, relative), "utf8");
+    assert.match(source, /transition < 30/);
+    assert.match(source, /waitForChange/);
+    assert.match(source, /visited\.has\(after\)/);
+    assert.match(source, /signature\(\) !== initialSignature/);
+    assert.match(source, /closest\('header, nav'\)/);
+    assert.match(source, /svg title/);
+  }
 });

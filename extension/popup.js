@@ -486,20 +486,18 @@ async function collectPageContext(tab, options = {}) {
               if (!items.has(key)) items.set(key, { index: items.size, type: isVideo ? 'video' : 'image', src: normalized, poster: isVideo ? absolutize(node.poster || '') : '', duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0, width: node.videoWidth || node.naturalWidth || node.clientWidth || 0, height: node.videoHeight || node.naturalHeight || node.clientHeight || 0 });
             }
           };
-          const control = (pattern) => [...root.querySelectorAll('button')].find((button) => pattern.test(button.getAttribute('aria-label') || ''));
+          const signature = () => [...root.querySelectorAll('video, img')].map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ node, rect }) => !node.closest('header, nav') && rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height).map(({ node }) => node.currentSrc || node.src || node.poster || '').find(Boolean) || '';
+          const control = (direction) => {
+            const buttons = [...root.querySelectorAll('[role="button"], button')].filter((button) => button.getBoundingClientRect().width > 0);
+            const words = direction === 'next' ? /next|下一|次へ|다음/i : /previous|prev|上一|前へ|이전/i;
+            return buttons.find((button) => words.test(`${button.getAttribute('aria-label') || ''} ${button.querySelector('svg title')?.textContent || ''}`)) || buttons.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left).at(direction === 'next' ? -1 : 0);
+          };
+          const waitForChange = async (before) => { for (let poll = 0; poll < 10; poll += 1) { await new Promise((resolve) => setTimeout(resolve, 60)); if (signature() && signature() !== before) return signature(); } return ''; };
           read();
-          let advances = 0;
-          let unchanged = 0;
-          while (advances < 12 && control(/next/i) && unchanged < 2) {
-            const before = items.size;
-            control(/next/i).click(); advances += 1;
-            await new Promise((resolve) => setTimeout(resolve, 160));
-            read(); unchanged = items.size === before ? unchanged + 1 : 0;
-          }
-          for (let index = 0; index < advances && control(/previous/i); index += 1) {
-            control(/previous/i).click();
-            await new Promise((resolve) => setTimeout(resolve, 50));
-          }
+          const initialSignature = signature();
+          const visited = new Set([initialSignature]);
+          for (let transition = 0; transition < 30; transition += 1) { const button = control('next'); if (!button) break; const before = signature(); button.click(); const after = await waitForChange(before); if (!after || visited.has(after)) break; visited.add(after); read(); }
+          for (let restore = 0; restore < 30 && signature() !== initialSignature; restore += 1) { const button = control('previous'); if (!button) break; const before = signature(); button.click(); if (!await waitForChange(before)) break; }
           return [...items.values()];
         }
 
