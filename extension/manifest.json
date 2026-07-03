@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Chaopi Link Router",
   "description": "Send the current page to Eagle, Bear, and Obsidian from one popup.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "permissions": ["activeTab", "scripting", "contextMenus", "storage", "tabs"],
   "host_permissions": [
     "http://127.0.0.1:18791/*",

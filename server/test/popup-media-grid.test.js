@@ -6,6 +6,7 @@ import test from "node:test";
 const extensionPath = path.resolve(import.meta.dirname, "../../extension");
 const popupHtml = fs.readFileSync(path.join(extensionPath, "popup.html"), "utf8");
 const popupJs = fs.readFileSync(path.join(extensionPath, "popup.js"), "utf8");
+const backgroundJs = fs.readFileSync(path.join(extensionPath, "background.js"), "utf8");
 const popupCss = fs.readFileSync(path.join(extensionPath, "popup.css"), "utf8");
 
 test("Eagle and Bear expose media selection hosts while Obsidian stays untouched", () => {
@@ -72,6 +73,12 @@ test("all website media grids show only media, with video corner badges and hove
   assert.match(popupCss, /\.candidate-option:focus-visible::after/);
   assert.match(popupCss, /\.media-badges\s*\{[^}]*bottom:\s*var\(--space-s1\)/s);
   assert.doesNotMatch(popupCss, /\.media-badges\s*\{[^}]*top:/s);
+});
+
+test("Instagram carousel traversal falls back to main when Dia omits article", () => {
+  for (const source of [popupJs, backgroundJs]) {
+    assert.match(source, /document\.querySelector\('main article'\).*document\.querySelector\('article'\).*document\.querySelector\('main'\)/s);
+  }
 });
 
 test("shared grid shell provides explicit vertical rhythm", () => {
