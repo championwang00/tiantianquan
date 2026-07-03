@@ -328,6 +328,8 @@ async function buildImportCandidates(payload, metadata) {
     candidates.push(...videoCandidates);
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
     candidates.push(...imageCandidates);
+  } else if (sourceType === "instagram") {
+    candidates.push(...buildInstagramCarouselCandidates(payload));
   } else {
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
     candidates.push(...imageCandidates.slice(0, 6));
@@ -443,8 +445,35 @@ function detectSourceType(url) {
     return "twitter";
   }
   if (host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com")) return "xiaohongshu";
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) return "instagram";
   if (host.includes("dribbble") || host.includes("behance")) return "portfolio";
   return "webpage";
+}
+
+function buildInstagramCarouselCandidates(payload) {
+  const seen = new Set();
+  return (payload.pageAssets?.carousel || []).map((asset) => {
+    const index = Number(asset.index);
+    const type = asset.type === "video" ? "video" : "image";
+    const url = type === "video" ? normalizeContentVideoUrl(asset.src || "") : normalizeContentImageUrl(asset.src || "", "instagram");
+    const key = `${type}:${url || index}`;
+    if ((type === "image" && !url) || seen.has(key) || !Number.isInteger(index) || index < 0) return null;
+    seen.add(key);
+    return makeCandidate({
+      kind: type === "video" ? "media-url" : "asset-url",
+      sourceType: "instagram",
+      ...(type === "video" ? { mediaUrl: url } : { assetUrl: url }),
+      poster: asset.poster || "",
+      selected: true,
+      label: `Instagram ${type === "video" ? "视频" : "图片"} ${index + 1}`,
+      id: `instagram-carousel:${index}:${type}:${safeShellName(url)}`,
+      carouselIndex: index,
+      postUrl: payload.url,
+      duration: Number(asset.duration || 0),
+      width: Number(asset.width || 0),
+      height: Number(asset.height || 0)
+    });
+  }).filter(Boolean).sort((a, b) => a.carouselIndex - b.carouselIndex);
 }
 
 function buildContentImageCandidates(payload, sourceType, options = {}) {
@@ -784,7 +813,10 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
   }
   if (importPlan.kind === "media-url") {
-    const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType);
+    const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType).catch((error) => {
+      if (importPlan.sourceType !== "instagram" || !importPlan.postUrl || !Number.isInteger(importPlan.carouselIndex)) throw error;
+      return downloadInstagramCarouselVideo(importPlan.postUrl, importPlan.carouselIndex, metadata);
+    });
     importPlan.asset = asset;
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
   }
@@ -800,6 +832,21 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
     return importPathToEagle(importPlan.asset.filePath, payload, metadata, folders, annotation);
   }
   return importUrlToEagle(payload, metadata, folders, annotation);
+}
+
+async function downloadInstagramCarouselVideo(postUrl, carouselIndex, metadata) {
+  const outputTemplate = path.join(os.tmpdir(), `clip-router-instagram-${carouselIndex}-${Date.now()}-${safeShellName(metadata.titleZh || "video")}.%(ext)s`);
+  const { stdout } = await execFileAsync("yt-dlp", [
+    "--playlist-items", String(carouselIndex + 1),
+    "--merge-output-format", "mp4",
+    "-f", "bv*+ba/b",
+    "-o", outputTemplate,
+    "--print", "after_move:filepath",
+    postUrl
+  ], { timeout: 120000, maxBuffer: 1024 * 1024 * 2 });
+  const paths = stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (paths.length !== 1) throw new Error(`Instagram 第 ${carouselIndex + 1} 项视频兜底未返回唯一文件`);
+  return { filePath: paths[0], filename: path.basename(paths[0]), source: "yt-dlp-instagram-carousel", size: await fileSize(paths[0]) };
 }
 
 async function downloadRemoteAsset(assetUrl, metadata, sourceType = "asset") {
@@ -937,6 +984,9 @@ function summarizeImportPlan(importPlan) {
     thumbnailFilename: importPlan.thumbnail?.filename || importPlan.thumbnailFilename || "",
     width: importPlan.width || 0,
     height: importPlan.height || 0,
+    duration: importPlan.duration || 0,
+    carouselIndex: importPlan.carouselIndex,
+    postUrl: importPlan.postUrl || "",
     reason: importPlan.reason || ""
   };
 }

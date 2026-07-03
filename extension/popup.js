@@ -344,7 +344,7 @@ async function collectPageContext(tab, options = {}) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
-      func: ({ fullContent, deepAssets }) => {
+      func: async ({ fullContent, deepAssets }) => {
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
@@ -354,6 +354,7 @@ async function collectPageContext(tab, options = {}) {
         const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 20 : 6);
         const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 10) : [];
         const videoRects = deepAssets ? collectVideoRects(mainTweetRoot).slice(0, 5) : [];
+        const carousel = deepAssets ? await collectInstagramCarousel() : [];
         const content = fullContent
           ? {
               text: (visibleText || getVisibleText(document.body)).slice(0, 60000),
@@ -375,6 +376,7 @@ async function collectPageContext(tab, options = {}) {
             images,
             videos,
             videoRects,
+            carousel,
             viewport: {
               width: window.innerWidth || document.documentElement.clientWidth || 0,
               height: window.innerHeight || document.documentElement.clientHeight || 0,
@@ -463,6 +465,42 @@ async function collectPageContext(tab, options = {}) {
             }));
           if (byStatusLink) return byStatusLink;
           return articles.find((article) => article.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], video, img[src*="pbs.twimg.com/media"]')) || null;
+        }
+
+        async function collectInstagramCarousel() {
+          if (!/^\/p\//.test(location.pathname) || !/(^|\.)instagram\.com$/.test(location.hostname)) return [];
+          const root = document.querySelector('main article') || document.querySelector('article');
+          if (!root) return [];
+          const items = new Map();
+          const read = () => {
+            for (const node of [...root.querySelectorAll('video, img')].filter((item) => {
+              if (item.closest('header')) return false;
+              const rect = item.getBoundingClientRect();
+              return rect.width >= 240 && rect.height >= 240;
+            })) {
+              const isVideo = node.tagName === 'VIDEO';
+              const src = isVideo ? (node.currentSrc || node.src || [...node.querySelectorAll('source')].map((source) => source.src).find(Boolean) || '') : (pickLargestSrcset(node.getAttribute('srcset') || '') || node.currentSrc || node.src || '');
+              const normalized = absolutize(src);
+              if (!normalized || normalized.startsWith('data:')) continue;
+              const key = `${isVideo ? 'video' : 'image'}:${normalized}`;
+              if (!items.has(key)) items.set(key, { index: items.size, type: isVideo ? 'video' : 'image', src: normalized, poster: isVideo ? absolutize(node.poster || '') : '', duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0, width: node.videoWidth || node.naturalWidth || node.clientWidth || 0, height: node.videoHeight || node.naturalHeight || node.clientHeight || 0 });
+            }
+          };
+          const control = (pattern) => [...root.querySelectorAll('button')].find((button) => pattern.test(button.getAttribute('aria-label') || ''));
+          read();
+          let advances = 0;
+          let unchanged = 0;
+          while (advances < 12 && control(/next/i) && unchanged < 2) {
+            const before = items.size;
+            control(/next/i).click(); advances += 1;
+            await new Promise((resolve) => setTimeout(resolve, 160));
+            read(); unchanged = items.size === before ? unchanged + 1 : 0;
+          }
+          for (let index = 0; index < advances && control(/previous/i); index += 1) {
+            control(/previous/i).click();
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return [...items.values()];
         }
 
         function collectImages(deep, scopeRoot = null) {
@@ -704,7 +742,7 @@ async function collectPageContext(tab, options = {}) {
 }
 
 function emptyPageContext() {
-  return { meta: {}, assets: { images: [] }, content: { text: "", markdown: "", htmlSnapshot: "" } };
+  return { meta: {}, assets: { images: [], videos: [], videoRects: [], carousel: [] }, content: { text: "", markdown: "", htmlSnapshot: "" } };
 }
 
 function isRichMediaUrl(url) {
@@ -715,7 +753,9 @@ function isRichMediaUrl(url) {
       || host.endsWith(".x.com")
       || host.endsWith(".twitter.com")
       || host === "xiaohongshu.com"
-      || host.endsWith(".xiaohongshu.com");
+      || host.endsWith(".xiaohongshu.com")
+      || host === "instagram.com"
+      || host.endsWith(".instagram.com");
   } catch (_error) {
     return false;
   }

@@ -65,3 +65,31 @@ test("falls back to the screenshot candidate when a selected X video import fail
   assert.equal(result.candidate.kind, "screenshot");
   assert.match(result.fallbackReason, /yt-dlp timed out/);
 });
+
+test("preserves Instagram carousel order, deduplicates media, and includes carousel metadata", async () => {
+  const candidates = await __testHooks.buildImportCandidates({
+    url: "https://www.instagram.com/p/ABC123/",
+    title: "Instagram post",
+    options: { eagle: { captureMode: "top-image" } },
+    pageMeta: { image: "https://cdn.example/avatar.jpg" },
+    pageAssets: {
+      carousel: [
+        { index: 0, type: "image", src: "https://cdn.example/one.jpg", width: 1080, height: 1350 },
+        { index: 1, type: "video", src: "https://cdn.example/two.mp4", poster: "https://cdn.example/two.jpg", duration: 4.2, width: 1080, height: 1920 },
+        { index: 1, type: "video", src: "https://cdn.example/two.mp4", poster: "https://cdn.example/two.jpg" },
+        { index: 2, type: "image", src: "https://cdn.example/three.jpg", width: 1080, height: 1080 }
+      ],
+      images: [{ src: "https://cdn.example/comment-avatar.jpg" }],
+      videos: []
+    },
+    pageContent: {}
+  }, { titleZh: "Instagram 帖子" });
+
+  const carousel = __testHooks.summarizeCandidates(candidates)
+    .filter((candidate) => candidate.carouselIndex !== undefined);
+  assert.deepEqual(carousel.map((candidate) => candidate.kind), ["asset-url", "media-url", "asset-url"]);
+  assert.deepEqual(carousel.map((candidate) => candidate.carouselIndex), [0, 1, 2]);
+  assert.deepEqual(carousel.map((candidate) => candidate.postUrl), Array(3).fill("https://www.instagram.com/p/ABC123/"));
+  assert.equal(new Set(carousel.map((candidate) => candidate.id)).size, 3);
+  assert.equal(carousel[1].duration, 4.2);
+});
