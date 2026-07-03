@@ -56,6 +56,7 @@ async function init() {
     card.querySelector(".channel-summary").addEventListener("click", () => toggleCard(card.dataset.target));
     card.querySelector('[data-role="confirm"]').addEventListener("click", () => confirmChannel(card.dataset.target));
   }
+  for (const target of ["eagle", "bear"]) bindCandidateToolbar(target);
   document.querySelector("#eagleCaptureMode").addEventListener("change", () => refreshIfOpen("eagle"));
   document.querySelector("#bearScreenshotToggle").addEventListener("change", persistCurrentOptions);
   await prepareOpenTargets().catch((error) => {
@@ -1068,15 +1069,20 @@ function setCardConfirmState(target) {
   const isConfirming = confirmingTargets.has(target);
   const isPreparing = status === "running" || status === "queued";
   const canConfirm = ["needs_review", "success", "exists", "failed"].includes(status);
-  button.disabled = isConfirming || isPreparing || !canConfirm;
+  const candidates = getCandidatesFromResult(currentTasks[target]?.results?.[target]);
+  const selectedCount = getSelectedCandidateIds(target).length;
+  const hasCandidates = candidates.length > 0;
+  button.disabled = isConfirming || isPreparing || !canConfirm || (hasCandidates && selectedCount === 0);
   button.classList.toggle("is-loading", isPreparing || isConfirming);
   button.setAttribute("aria-busy", String(isPreparing || isConfirming));
   if (isConfirming) {
     button.textContent = "正在收录...";
   } else if (isPreparing) {
     button.textContent = "正在生成...";
-  } else if (status === "needs_review") {
-    button.textContent = "确认收录";
+  } else if ((target === "eagle" || target === "bear") && canConfirm) {
+    button.textContent = target === "eagle"
+      ? `保存已选 ${selectedCount} 项到 Eagle`
+      : `将 ${selectedCount} 个附件加入 Bear`;
   } else if (status === "success") {
     button.textContent = "再次收录";
   } else if (status === "exists") {
@@ -1138,6 +1144,13 @@ function renderTargetCandidates(target, result) {
   withScrollPreserved(() => {
     const list = panel.querySelector(".candidate-list");
     const candidates = getCandidatesFromResult(result);
+    const selectedCount = getSelectedCandidateIds(target).length;
+    const count = panel.querySelector('[data-role="candidate-count"]');
+    if (count) count.textContent = `已读取 ${candidates.length} 项 · 已选 ${selectedCount} 项`;
+    const selectAll = panel.querySelector('[data-action="select-all"]');
+    const clear = panel.querySelector('[data-action="clear-selection"]');
+    if (selectAll) selectAll.disabled = !candidates.length || selectedCount === candidates.length;
+    if (clear) clear.disabled = selectedCount === 0;
     if (!candidates.length) {
       list.className = "candidate-list candidate-list-empty";
       list.textContent = result.status === "running" || result.status === "queued"
@@ -1146,8 +1159,24 @@ function renderTargetCandidates(target, result) {
       return;
     }
     list.className = "candidate-list";
-    list.replaceChildren(...candidates.map((candidate) => renderCandidate(candidate, target)));
+    list.replaceChildren(...candidates.map((candidate) => renderMediaGridCard(candidate, target)));
   });
+}
+
+function bindCandidateToolbar(target) {
+  const panel = getCard(target).querySelector('[data-role="candidates"]');
+  panel?.querySelector('[data-action="select-all"]')?.addEventListener("click", () => setCandidateSelection(target, true));
+  panel?.querySelector('[data-action="clear-selection"]')?.addEventListener("click", () => setCandidateSelection(target, false));
+}
+
+function setCandidateSelection(target, selectAll) {
+  rememberScroll();
+  const candidates = getCandidatesFromResult(currentTasks[target]?.results?.[target]);
+  const nextIds = selectAll ? candidates.map((candidate) => candidate.id) : [];
+  if (target === "bear") selectedBearCandidateIds = nextIds;
+  else selectedEagleCandidateIds = nextIds;
+  renderTargetCandidates(target, currentTasks[target]?.results?.[target] || {});
+  setCardConfirmState(target);
 }
 
 function getCandidatesFromResult(result) {
@@ -1287,18 +1316,17 @@ function persistCurrentOptions() {
   });
 }
 
-function renderCandidate(candidate, target = "eagle") {
+function renderMediaGridCard(candidate, target = "eagle") {
   const selectedIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
   const checked = selectedIds.includes(candidate.id);
-  const label = document.createElement("label");
-  label.className = `candidate-option${checked ? " is-selected" : ""}`;
-
-  const checkbox = document.createElement("input");
-  checkbox.type = "checkbox";
-  checkbox.checked = checked;
-  checkbox.addEventListener("change", () => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `candidate-option${checked ? " is-selected" : ""}`;
+  button.setAttribute("aria-pressed", String(checked));
+  button.setAttribute("aria-label", `${checked ? "取消选择" : "选择"}${candidateTitle(candidate)}`);
+  button.addEventListener("click", () => {
     rememberScroll();
-    if (checkbox.checked) {
+    if (!checked) {
       const nextIds = [...new Set([...selectedIds, candidate.id])];
       if (target === "bear") selectedBearCandidateIds = nextIds;
       else selectedEagleCandidateIds = nextIds;
@@ -1315,13 +1343,17 @@ function renderCandidate(candidate, target = "eagle") {
   body.className = "candidate-body";
   const title = document.createElement("strong");
   title.textContent = candidateTitle(candidate);
-  const meta = document.createElement("small");
-  meta.textContent = [candidate.filename || candidate.assetUrl || candidate.label, formatBytes(candidate.size)].filter(Boolean).join(" · ");
-  body.append(title, meta);
+  body.append(title);
 
-  label.append(checkbox, body);
-  label.append(renderCandidatePreview(candidate));
-  return label;
+  button.append(renderCandidatePreview(candidate), body);
+  const check = el("span", "candidate-check", "✓");
+  check.setAttribute("aria-hidden", "true");
+  button.append(check);
+  return button;
+}
+
+function renderCandidate(candidate, target = "eagle") {
+  return renderMediaGridCard(candidate, target);
 }
 
 function renderCandidatePreview(candidate) {
@@ -1331,12 +1363,13 @@ function renderCandidatePreview(candidate) {
   if (candidate.kind === "media-file" && candidate.filePath) {
     const video = document.createElement("video");
     video.className = "candidate-video";
-    video.controls = true;
+    video.controls = false;
     video.muted = true;
     video.playsInline = true;
+    video.autoplay = false;
     video.preload = "metadata";
     video.src = buildPreviewAssetUrl(candidate.filePath);
-    wrap.append(video);
+    wrap.append(video, renderVideoBadges(candidate));
     return wrap;
   }
 
@@ -1346,18 +1379,19 @@ function renderCandidatePreview(candidate) {
       image.className = "candidate-image";
       image.alt = `${candidateTitle(candidate)}首帧`;
       image.src = buildPreviewAssetUrl(candidate.thumbnailPath);
-      wrap.append(image);
+      wrap.append(image, renderVideoBadges(candidate));
       return wrap;
     }
     const video = document.createElement("video");
     video.className = "candidate-video";
-    video.controls = true;
+    video.controls = false;
     video.muted = true;
     video.playsInline = true;
+    video.autoplay = false;
     video.preload = "metadata";
     video.src = candidate.mediaUrl;
     if (candidate.poster) video.poster = candidate.poster;
-    wrap.append(video);
+    wrap.append(video, renderVideoBadges(candidate));
     return wrap;
   }
 
@@ -1381,7 +1415,7 @@ function renderCandidatePreview(candidate) {
     text.textContent = candidate.kind === "twitter-gif"
       ? "确认写入 Bear 时再下载并转换为 GIF。"
       : "确认收录时再下载完整视频，可显著加快预览生成。";
-    wrap.append(text);
+    wrap.append(text, renderVideoBadges(candidate));
     return wrap;
   }
 
@@ -1414,6 +1448,20 @@ function renderCandidatePreview(candidate) {
     : "保存网页链接和元数据";
   wrap.append(icon, text);
   return wrap;
+}
+
+function renderVideoBadges(candidate) {
+  const badges = el("span", "media-badges", "");
+  const play = el("span", "media-play-badge", "▶");
+  play.setAttribute("aria-hidden", "true");
+  badges.append(play);
+  if (Number(candidate.duration) > 0) badges.append(el("span", "media-duration-badge", formatDuration(candidate.duration)));
+  return badges;
+}
+
+function formatDuration(value) {
+  const seconds = Math.max(0, Math.round(Number(value) || 0));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function candidateTitle(candidate) {
