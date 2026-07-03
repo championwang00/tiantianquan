@@ -38,6 +38,16 @@ test("selection controls and confirmation labels reflect candidate counts", () =
   assert.match(popupJs, /clear-selection/);
 });
 
+test("grid rerenders preserve focus only for controls in the same target panel", () => {
+  assert.match(popupJs, /function captureCandidateGridFocus\(panel, target\)/);
+  assert.match(popupJs, /panel\.contains\(document\.activeElement\)/);
+  assert.match(popupJs, /dataset\.candidateId/);
+  assert.match(popupJs, /dataset\.gridAction/);
+  assert.match(popupJs, /dataset\.gridTarget = target/);
+  assert.match(popupJs, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(popupJs, /restoreCandidateGridFocus\(panel, focusState\)/);
+});
+
 test("grid visuals are three-column, square, keyboard-visible and motion-safe", () => {
   assert.match(popupCss, /\.candidate-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/s);
   assert.doesNotMatch(popupCss, /\.candidate-panel \.candidate-list/);
@@ -55,6 +65,12 @@ test("video tiles are opt-in playback with duration and play affordances", () =>
   assert.match(popupJs, /video\.autoplay = false/);
   assert.match(popupJs, /media-play-badge/);
   assert.match(popupJs, /media-duration-badge/);
-  assert.match(popupCss, /\.media-badges\s*\{[^}]*bottom:\s*var\(--space-s1\)/s);
+  assert.match(popupCss, /--candidate-caption-height:/);
+  assert.match(popupCss, /\.candidate-body\s*\{[^}]*min-height:\s*var\(--candidate-caption-height\)/s);
+  assert.match(popupCss, /\.media-badges\s*\{[^}]*bottom:\s*calc\(var\(--candidate-caption-height\) \+ var\(--space-s1\)\)/s);
   assert.doesNotMatch(popupCss, /\.media-badges\s*\{[^}]*top:/s);
+});
+
+test("shared grid shell provides explicit vertical rhythm", () => {
+  assert.match(popupCss, /\.candidate-grid-shell\s*\{[^}]*display:\s*grid;[^}]*gap:/s);
 });

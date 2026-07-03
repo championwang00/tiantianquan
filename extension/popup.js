@@ -1140,10 +1140,30 @@ function syncCandidatesFromResult(target, result) {
 function renderTargetCandidates(target, result) {
   const panel = getCard(target).querySelector('[data-role="candidates"]');
   if (!panel) return;
+  const focusState = captureCandidateGridFocus(panel, target);
   withScrollPreserved(() => {
     const candidates = getCandidatesFromResult(result);
     panel.replaceChildren(renderCandidateGrid(target, candidates, result.status));
+    restoreCandidateGridFocus(panel, focusState);
   });
+}
+
+function captureCandidateGridFocus(panel, target) {
+  const active = document.activeElement;
+  if (!active || !panel.contains(document.activeElement) || active.dataset.gridTarget !== target) return null;
+  if (active.dataset.candidateId) return { candidateId: active.dataset.candidateId, target };
+  if (active.dataset.gridAction) return { gridAction: active.dataset.gridAction, target };
+  return null;
+}
+
+function restoreCandidateGridFocus(panel, focusState) {
+  if (!focusState) return;
+  const controls = panel.querySelectorAll("[data-grid-target]");
+  const match = [...controls].find((control) => control.dataset.gridTarget === focusState.target
+    && (focusState.candidateId
+      ? control.dataset.candidateId === focusState.candidateId
+      : control.dataset.gridAction === focusState.gridAction));
+  match?.focus({ preventScroll: true });
 }
 
 function renderCandidateGrid(target, candidates, status = "") {
@@ -1156,12 +1176,16 @@ function renderCandidateGrid(target, candidates, status = "") {
   const selectAll = el("button", "", "全选");
   selectAll.type = "button";
   selectAll.dataset.action = "select-all";
-  selectAll.disabled = !candidates.length || selectedCount === candidates.length;
+  selectAll.dataset.gridAction = "select-all";
+  selectAll.dataset.gridTarget = target;
+  selectAll.disabled = !candidates.length;
   selectAll.addEventListener("click", () => setCandidateSelection(target, true));
   const clear = el("button", "", "清空");
   clear.type = "button";
   clear.dataset.action = "clear-selection";
-  clear.disabled = selectedCount === 0;
+  clear.dataset.gridAction = "clear-selection";
+  clear.dataset.gridTarget = target;
+  clear.disabled = !candidates.length;
   clear.addEventListener("click", () => setCandidateSelection(target, false));
   tools.append(selectAll, clear);
   head.append(count, tools);
@@ -1332,6 +1356,8 @@ function renderMediaGridCard(candidate, target = "eagle") {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `candidate-option${checked ? " is-selected" : ""}`;
+  button.dataset.candidateId = candidate.id;
+  button.dataset.gridTarget = target;
   button.setAttribute("aria-pressed", String(checked));
   button.setAttribute("aria-label", `${checked ? "取消选择" : "选择"}${candidateTitle(candidate)}`);
   button.addEventListener("click", () => {
