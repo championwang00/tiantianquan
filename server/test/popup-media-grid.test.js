@@ -74,3 +74,16 @@ test("video tiles are opt-in playback with duration and play affordances", () =>
 test("shared grid shell provides explicit vertical rhythm", () => {
   assert.match(popupCss, /\.candidate-grid-shell\s*\{[^}]*display:\s*grid;[^}]*gap:/s);
 });
+
+test("partial success stays retryable and shows a friendly Chinese summary", () => {
+  assert.match(popupJs, /result\.status === "partial_success"/);
+  assert.match(popupJs, /部分写入/);
+  assert.match(popupJs, /成功.*失败|失败.*成功/);
+  assert.match(popupJs, /"partial_success".*\.includes\(status\)/s);
+});
+
+test("partial success keeps failed candidates selected and removes successful ones for retry", () => {
+  assert.match(popupJs, /function syncPartialSuccessSelection\(target, result\)/);
+  assert.match(popupJs, /item\.status === "failed"/);
+  assert.match(popupJs, /syncPartialSuccessSelection\(target, result\)/);
+});

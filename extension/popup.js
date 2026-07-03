@@ -210,7 +210,7 @@ async function confirmChannel(target) {
   const taskState = currentTasks[target];
   if (confirmingTargets.has(target)) return;
   const targetStatus = taskState?.results?.[target]?.status;
-  if (!["needs_review", "success", "exists", "failed"].includes(targetStatus)) return;
+  if (!["needs_review", "success", "exists", "failed", "partial_success"].includes(targetStatus)) return;
   clearSuccessReset(target);
 
   confirmingTargets.add(target);
@@ -223,8 +223,10 @@ async function confirmChannel(target) {
     currentTasks[target] = { ...task, target };
     await persistTaskState(target, currentTasks[target]);
     renderTaskForTarget(task, target);
-    scheduleSuccessReset(target);
-    setStatus(`${CHANNELS[target].label} 写入完成。对应软件已尝试唤起。`);
+    if (task.results?.[target]?.status !== "partial_success") scheduleSuccessReset(target);
+    setStatus(task.results?.[target]?.status === "partial_success"
+      ? `${CHANNELS[target].label} 部分写入，请重试失败项。`
+      : `${CHANNELS[target].label} 写入完成。对应软件已尝试唤起。`);
   } catch (error) {
     setShellState("error");
     setCardStatus(target, "失败");
@@ -882,12 +884,13 @@ function renderTaskForTarget(task, target) {
     return;
   }
   setCardBusy(target, false);
+  if (target === "eagle" || target === "bear") syncPartialSuccessSelection(target, result);
   if (target === "eagle" || target === "bear") syncCandidatesFromResult(target, result);
   if (target === "eagle" || target === "bear") renderTargetCandidates(target, result);
   setCardPreview(target, result.previewFields || result.preview || result.draft || result.reason || "");
   setCardHasContent(target, Boolean(result.previewFields || result.preview || result.draft));
   setCardStatus(target, formatStatus(result));
-  setCardInlineState(target, result.reason || formatStatus(result));
+  setCardInlineState(target, formatResultReason(result));
   if (target === "eagle") syncEagleFolderFromResult(result);
   setShellState(result.status === "failed" ? "error" : "ready");
   setCardConfirmState(target);
@@ -898,7 +901,15 @@ function formatStatus(result) {
   if (result.status === "success") return "已写入";
   if (result.status === "exists") return "已写入";
   if (result.status === "failed") return "失败";
+  if (result.status === "partial_success") return "部分写入";
   return result.status || "处理中";
+}
+
+function formatResultReason(result) {
+  if (result.status !== "partial_success") return result.reason || formatStatus(result);
+  const succeeded = Number(result.succeeded || 0);
+  const failed = Number(result.failed || 0);
+  return result.reason || `部分写入：${succeeded} 个成功，${failed} 个失败。已自动保留失败项，可直接重试。`;
 }
 
 function clearPreparedState() {
@@ -1067,7 +1078,7 @@ function setCardConfirmState(target) {
   const status = currentTasks[target]?.results?.[target]?.status || "";
   const isConfirming = confirmingTargets.has(target);
   const isPreparing = status === "running" || status === "queued";
-  const canConfirm = ["needs_review", "success", "exists", "failed"].includes(status);
+  const canConfirm = ["needs_review", "success", "exists", "failed", "partial_success"].includes(status);
   const candidates = getCandidatesFromResult(currentTasks[target]?.results?.[target]);
   const selectedCount = getSelectedCandidateIds(target).length;
   const hasCandidates = candidates.length > 0;
@@ -1127,7 +1138,7 @@ function syncCandidatesFromResult(target, result) {
   const validIds = new Set(candidates.map((candidate) => candidate.id));
   const currentIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
   const nextIds = currentIds.filter((id) => validIds.has(id));
-  if (!nextIds.length) {
+  if (!nextIds.length && result.status !== "partial_success") {
     nextIds.push(...candidates.filter((candidate) => candidate.selected).map((candidate) => candidate.id));
   }
   if (target === "bear") {
@@ -1135,6 +1146,16 @@ function syncCandidatesFromResult(target, result) {
   } else {
     selectedEagleCandidateIds = nextIds;
   }
+}
+
+function syncPartialSuccessSelection(target, result) {
+  if (result.status !== "partial_success" || !Array.isArray(result.items)) return;
+  const failedIds = result.items
+    .filter((item) => item.status === "failed")
+    .map((item) => item.id)
+    .filter(Boolean);
+  if (target === "bear") selectedBearCandidateIds = failedIds;
+  else selectedEagleCandidateIds = failedIds;
 }
 
 function renderTargetCandidates(target, result) {

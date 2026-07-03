@@ -55,10 +55,40 @@ test("continues after one attachment fails and reports per-item outcome", async 
   const result = await confirmBearWrite(task, { candidateIds: ["bad", "good"] });
 
   assert.deepEqual(files, ["good.jpg"]);
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "partial_success");
+  assert.equal(result.reason, "Bear 笔记已保存，附件 1/2 个成功，1 个失败");
   assert.equal(result.succeeded, 1);
   assert.equal(result.failed, 1);
   assert.deepEqual(result.items.map(({ id, status }) => [id, status]), [["good", "success"], ["bad", "failed"]]);
+});
+
+test("rejects explicit stale candidate ids instead of falling back to the first candidate", async () => {
+  let resolved = 0;
+  __setBearTestHooks({
+    resolveCandidate: async () => { resolved += 1; return { filePath: "/tmp/unexpected.jpg", filename: "unexpected.jpg" }; },
+    append: async () => {}, wait: async () => {}, verify: async () => ({ count: 1, imageRefCount: 0 })
+  });
+
+  await assert.rejects(
+    confirmBearWrite(bearTask([candidate("current")]), { candidateIds: ["stale"] }),
+    /所选 Bear 素材已失效/
+  );
+  assert.equal(resolved, 0);
+});
+
+test("reports failed when the note is saved but every selected attachment fails", async () => {
+  __setBearTestHooks({
+    resolveCandidate: async (entry) => ({ filePath: `/tmp/${entry.id}.jpg`, filename: `${entry.id}.jpg` }),
+    append: async () => {}, addFile: async () => { throw new Error("attachment rejected"); }, wait: async () => {},
+    verify: async () => ({ count: 1, imageRefCount: 0 })
+  });
+
+  const result = await confirmBearWrite(bearTask([candidate("one"), candidate("two")]), { candidateIds: ["one", "two"] });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, "Bear 笔记已保存，但附件 0/2 个成功，2 个失败");
+  assert.equal(result.succeeded, 0);
+  assert.equal(result.failed, 2);
 });
 
 test("keeps an added attachment successful when optional indentation fails", async () => {

@@ -124,10 +124,17 @@ async function confirmBearWriteInner(task, options) {
     };
   }
 
+  const total = succeeded + failed;
+  const status = failed ? (succeeded ? "partial_success" : "failed") : "success";
+  const reason = failed
+    ? (succeeded
+      ? `Bear 笔记已保存，附件 ${succeeded}/${total} 个成功，${failed} 个失败`
+      : `Bear 笔记已保存，但附件 0/${total} 个成功，${failed} 个失败`)
+    : "Bear 写入并验证成功";
   return {
     ...result,
-    status: "success",
-    reason: "Bear 写入并验证成功",
+    status,
+    reason,
     writtenAt: new Date().toISOString(),
     screenshotFile: selectedAssets[0] || result.screenshotFile || null,
     writtenAssets: successfulAssets,
@@ -347,11 +354,18 @@ function bearCandidateLabel(candidate) {
 async function resolveSelectedBearAssets(task, options = {}) {
   const result = task.results?.bear;
   const candidates = result?.writePlan?.candidates || [];
-  const selectedIds = new Set((Array.isArray(options.candidateIds) ? options.candidateIds : []).filter(Boolean));
-  const selectedCandidates = selectedIds.size
+  const hasExplicitSelection = Object.prototype.hasOwnProperty.call(options, "candidateIds");
+  const candidateIds = Array.isArray(options.candidateIds) ? options.candidateIds : [];
+  const selectedIds = new Set(candidateIds.filter(Boolean));
+  const selectedCandidates = hasExplicitSelection
     ? candidates.filter((candidate) => selectedIds.has(candidate.id))
     : candidates.filter((candidate) => candidate.selected);
-  const selected = selectedCandidates.length ? selectedCandidates : candidates.slice(0, 1);
+  const selected = selectedCandidates.length
+    ? selectedCandidates
+    : (hasExplicitSelection ? [] : candidates.slice(0, 1));
+  if (!selected.length && selectedIds.size) {
+    throw new Error("所选 Bear 素材已失效，请重新选择后再试。");
+  }
   const assets = [];
   const items = [];
   for (const candidate of selected) {
