@@ -343,8 +343,9 @@ async function collectPageContext(tab, options = {}) {
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
-      func: async ({ fullContent, deepAssets }) => {
+      args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true, carouselTraversalSource: traverseInstagramCarousel.toString() }],
+      func: async ({ fullContent, deepAssets, carouselTraversalSource }) => {
+        const traverseCarousel = (0, eval)(`(${carouselTraversalSource})`);
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
@@ -471,34 +472,34 @@ async function collectPageContext(tab, options = {}) {
           if (!/^\/p\//.test(location.pathname) || !/(^|\.)instagram\.com$/.test(location.hostname)) return [];
           const root = document.querySelector('main article') || document.querySelector('article');
           if (!root) return [];
+          const initialMedia = [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside')).sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight))[0];
+          const carouselViewport = initialMedia?.parentElement;
+          if (!carouselViewport) return [];
           const items = new Map();
           const read = () => {
-            for (const node of [...root.querySelectorAll('video, img')].filter((item) => {
-              if (item.closest('header')) return false;
+            const viewport = carouselViewport.getBoundingClientRect();
+            for (const node of [...carouselViewport.querySelectorAll('video, img')].filter((item) => {
+              if (item.closest('header, nav, aside, [role="dialog"], [role="complementary"]')) return false;
               const rect = item.getBoundingClientRect();
-              return rect.width >= 240 && rect.height >= 240;
+              return rect.width >= 240 && rect.height >= 240 && rect.left >= viewport.left - 2 && rect.right <= viewport.right + 2 && rect.top >= viewport.top - 2 && rect.bottom <= viewport.bottom + 2;
             })) {
               const isVideo = node.tagName === 'VIDEO';
               const src = isVideo ? (node.currentSrc || node.src || [...node.querySelectorAll('source')].map((source) => source.src).find(Boolean) || '') : (pickLargestSrcset(node.getAttribute('srcset') || '') || node.currentSrc || node.src || '');
               const normalized = absolutize(src);
               if (!normalized || normalized.startsWith('data:')) continue;
               const key = `${isVideo ? 'video' : 'image'}:${normalized}`;
-              if (!items.has(key)) items.set(key, { index: items.size, type: isVideo ? 'video' : 'image', src: normalized, poster: isVideo ? absolutize(node.poster || '') : '', duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0, width: node.videoWidth || node.naturalWidth || node.clientWidth || 0, height: node.videoHeight || node.naturalHeight || node.clientHeight || 0 });
+              if (!items.has(key)) items.set(key, { index: items.size, type: isVideo ? 'video' : 'image', src: normalized, poster: isVideo ? absolutize(node.poster || '') : '', mediaId: node.getAttribute('data-media-id') || node.closest('[data-media-id]')?.getAttribute('data-media-id') || normalized.match(/(?:media|video)[_\/-](\d{5,})/i)?.[1] || '', duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0, width: node.videoWidth || node.naturalWidth || node.clientWidth || 0, height: node.videoHeight || node.naturalHeight || node.clientHeight || 0 });
             }
           };
           const signature = () => [...root.querySelectorAll('video, img')].map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ node, rect }) => !node.closest('header, nav') && rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height).map(({ node }) => node.currentSrc || node.src || node.poster || '').find(Boolean) || '';
           const control = (direction) => {
-            const buttons = [...root.querySelectorAll('[role="button"], button')].filter((button) => button.getBoundingClientRect().width > 0);
+            const viewport = carouselViewport.getBoundingClientRect();
+            const buttons = [...carouselViewport.parentElement.querySelectorAll('[role="button"], button')].filter((button) => { const rect = button.getBoundingClientRect(); return rect.width > 0 && rect.right >= viewport.left && rect.left <= viewport.right && rect.bottom >= viewport.top && rect.top <= viewport.bottom; });
             const words = direction === 'next' ? /next|下一|次へ|다음/i : /previous|prev|上一|前へ|이전/i;
-            return buttons.find((button) => words.test(`${button.getAttribute('aria-label') || ''} ${button.querySelector('svg title')?.textContent || ''}`)) || buttons.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left).at(direction === 'next' ? -1 : 0);
+            return buttons.find((button) => words.test(`${button.getAttribute('aria-label') || ''} ${button.querySelector('svg title')?.textContent || ''}`)) || buttons.find((button) => { const rect = button.getBoundingClientRect(); return button.querySelector('svg') && rect.width <= 64 && rect.height <= 64 && (direction === 'next' ? rect.left > viewport.left + viewport.width * .65 : rect.right < viewport.left + viewport.width * .35); });
           };
           const waitForChange = async (before) => { for (let poll = 0; poll < 10; poll += 1) { await new Promise((resolve) => setTimeout(resolve, 60)); if (signature() && signature() !== before) return signature(); } return ''; };
-          read();
-          const initialSignature = signature();
-          const visited = new Set([initialSignature]);
-          for (let transition = 0; transition < 30; transition += 1) { const button = control('next'); if (!button) break; const before = signature(); button.click(); const after = await waitForChange(before); if (!after || visited.has(after)) break; visited.add(after); read(); }
-          for (let restore = 0; restore < 30 && signature() !== initialSignature; restore += 1) { const button = control('previous'); if (!button) break; const before = signature(); button.click(); if (!await waitForChange(before)) break; }
-          return [...items.values()];
+          return traverseCarousel({ read: () => { read(); return [...items.values()]; }, signature, clickPrevious: () => { const button = control('previous'); if (!button) return false; button.click(); return true; }, clickNext: () => { const button = control('next'); if (!button) return false; button.click(); return true; }, waitForChange, maxTransitions: 30 });
         }
 
         function collectImages(deep, scopeRoot = null) {

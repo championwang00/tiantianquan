@@ -453,6 +453,7 @@ function detectSourceType(url) {
 
 function buildInstagramCarouselCandidates(payload) {
   const seen = new Set();
+  const carouselVideoCount = (payload.pageAssets?.carousel || []).filter((asset) => asset.type === "video").length;
   const shortcode = (() => {
     try { return new URL(payload.url).pathname.match(/^\/p\/([^/]+)/)?.[1] || "post"; } catch (_error) { return "post"; }
   })();
@@ -474,6 +475,8 @@ function buildInstagramCarouselCandidates(payload) {
       carouselIndex: index,
       postUrl: payload.url,
       duration: Number(asset.duration || 0),
+      mediaId: asset.mediaId || "",
+      carouselVideoCount,
       width: Number(asset.width || 0),
       height: Number(asset.height || 0)
     });
@@ -864,6 +867,7 @@ async function downloadInstagramCarouselVideo(postUrl, candidate, metadata) {
 function instagramEntryMatchesCandidate(entry, candidate) {
   if (!entry || !candidate || Number(entry.playlist_index) !== Number(candidate.carouselIndex) + 1) return false;
   const close = (actual, expected, tolerance) => !expected || (actual && Math.abs(Number(actual) - Number(expected)) <= tolerance);
+  if (candidate.carouselVideoCount > 1 && (!candidate.mediaId || !entry.id || String(candidate.mediaId) !== String(entry.id))) return false;
   return close(entry.duration, candidate.duration, 1)
     && close(entry.width, candidate.width, 4)
     && close(entry.height, candidate.height, 4);
@@ -1007,6 +1011,7 @@ function summarizeImportPlan(importPlan) {
     duration: importPlan.duration || 0,
     carouselIndex: importPlan.carouselIndex,
     postUrl: importPlan.postUrl || "",
+    mediaId: importPlan.mediaId || "",
     reason: importPlan.reason || ""
   };
 }

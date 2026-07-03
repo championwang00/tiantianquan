@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import test from "node:test";
 import { __testHooks } from "../src/adapters/eagle.js";
 
@@ -117,16 +118,41 @@ test("Instagram fallback accepts only the exact playlist index and captured vide
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, candidate), true);
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 3, duration: 8.1, width: 1080, height: 1920 }, candidate), false);
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 4, duration: 21, width: 1080, height: 1920 }, candidate), false);
+  assert.equal(__testHooks.instagramEntryMatchesCandidate({ id: "video-b", playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, { ...candidate, carouselVideoCount: 2, mediaId: "video-a" }), false);
+  assert.equal(__testHooks.instagramEntryMatchesCandidate({ id: "video-a", playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, { ...candidate, carouselVideoCount: 2, mediaId: "video-a" }), true);
 });
 
 test("background and popup Instagram capture keep transition, cap, restoration, and semantic scope safeguards", () => {
   for (const relative of ["../../extension/background.js", "../../extension/popup.js"]) {
     const source = fs.readFileSync(path.resolve(import.meta.dirname, relative), "utf8");
-    assert.match(source, /transition < 30/);
+    assert.match(source, /traverseCarousel/);
     assert.match(source, /waitForChange/);
-    assert.match(source, /visited\.has\(after\)/);
-    assert.match(source, /signature\(\) !== initialSignature/);
-    assert.match(source, /closest\('header, nav'\)/);
+    assert.match(source, /maxTransitions: 30/);
+    assert.match(source, /header, nav, aside/);
     assert.match(source, /svg title/);
   }
+});
+
+test("carousel traversal starts at first, orders and dedupes assets, stops at end, and restores a middle slide", async () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);
+  const traverse = context.globalThis.traverseInstagramCarousel;
+  const slides = [
+    [{ type: "image", src: "first" }, { type: "image", src: "unrelated", excluded: true }],
+    [{ type: "video", src: "current", mediaId: "v2" }, { type: "video", src: "current", mediaId: "v2" }],
+    [{ type: "image", src: "last" }]
+  ];
+  let position = 1;
+  const transition = async (before) => slides[position][0].src === before ? "" : slides[position][0].src;
+  const assets = await traverse({
+    read: () => slides[position].filter((asset) => !asset.excluded),
+    signature: () => slides[position][0].src,
+    clickPrevious: () => position > 0 ? (position -= 1, true) : false,
+    clickNext: () => position < slides.length - 1 ? (position += 1, true) : false,
+    waitForChange: transition
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(assets)).map(({ src, index }) => ({ src, index })), [
+    { src: "first", index: 0 }, { src: "current", index: 1 }, { src: "last", index: 2 }
+  ]);
+  assert.equal(position, 1);
 });
