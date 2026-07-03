@@ -273,10 +273,8 @@ async function collectPageContextInBackground(tab, options = {}) {
           if (!/^\/p\//.test(location.pathname) || !/(^|\.)instagram\.com$/.test(location.hostname)) return [];
           const root = document.querySelector('main article') || document.querySelector('article');
           if (!root) return [];
-          const initialMedia = [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside')).sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight))[0];
-          const carouselRoot = initialMedia ? [...function* ancestors(node) { for (let current = node.parentElement; current && current !== root; current = current.parentElement) yield current; }(initialMedia)].find((node) => node.querySelector('[role="button"], button')) || initialMedia.parentElement : null;
-          if (!carouselRoot) return [];
-          const activeMedia = () => [...carouselRoot.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')).map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ rect }) => rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0]?.node || null;
+          const activeMedia = () => [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')).map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ rect }) => rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0]?.node || null;
+          if (!activeMedia()) return [];
           const items = new Map();
           const read = () => {
             const active = activeMedia(); if (!active) return;
@@ -311,7 +309,7 @@ async function collectPageContextInBackground(tab, options = {}) {
           const control = (direction) => {
             const active = activeMedia(); if (!active) return null;
             const viewport = active.parentElement.getBoundingClientRect();
-            const buttons = [...carouselRoot.querySelectorAll('[role="button"], button')].filter((button) => { const rect = button.getBoundingClientRect(); return rect.width > 0 && rect.right >= viewport.left && rect.left <= viewport.right && rect.bottom >= viewport.top && rect.top <= viewport.bottom; });
+            const buttons = [...root.querySelectorAll('[role="button"], button')].filter((button) => { const rect = button.getBoundingClientRect(); return rect.width > 0 && rect.right >= viewport.left && rect.left <= viewport.right && rect.bottom >= viewport.top && rect.top <= viewport.bottom; });
             const words = direction === 'next' ? /next|下一|次へ|다음/i : /previous|prev|上一|前へ|이전/i;
             const semantic = buttons.find((button) => words.test(`${button.getAttribute('aria-label') || ''} ${button.querySelector('svg title')?.textContent || ''}`));
             if (semantic) return semantic;

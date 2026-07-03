@@ -130,6 +130,8 @@ test("background and popup Instagram capture keep transition, cap, restoration, 
     assert.match(source, /maxTransitions: 30/);
     assert.match(source, /header, nav, aside/);
     assert.match(source, /svg title/);
+    assert.doesNotMatch(source, /carouselRoot/);
+    assert.match(source, /\.\.\.root\.querySelectorAll\('video, img'\)/);
   }
 });
 
@@ -143,8 +145,8 @@ test("carousel traversal starts at first, orders and dedupes assets, stops at en
     [{ type: "image", src: "last" }]
   ];
   let position = 1;
-  let wrapper = { connected: true, assets: slides[position] };
-  const replaceWrapper = (next) => { wrapper.connected = false; position = next; wrapper = { connected: true, assets: slides[position] }; };
+  let wrapper = { connected: true, assets: slides[position], buttons: [{ kind: "mute", navigation: false }] };
+  const replaceWrapper = (next) => { wrapper.connected = false; position = next; wrapper = { connected: true, assets: slides[position], buttons: [{ kind: "tag", navigation: false }] }; };
   const transition = async (before) => slides[position][0].src === before ? "" : slides[position][0].src;
   const assets = await traverse({
     read: () => wrapper.connected ? wrapper.assets.filter((asset) => !asset.excluded) : [],
