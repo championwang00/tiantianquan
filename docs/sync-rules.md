@@ -23,9 +23,11 @@ This file records the project's core synchronization decisions.
 - Eagle and Bear use the same three-column media grid. Users can select all,
   clear the selection, or choose multiple items; confirmation preserves the
   candidate display order. Obsidian intentionally has no media-selection grid.
-- Instagram collection traverses the carousel to its first slide, walks forward
-  until complete (with bounded transition protection), deduplicates media, and
-  preserves carousel order. Images and videos remain distinct candidates.
+- Instagram collection attempts to traverse to the first slide and then walk
+  forward, deduplicating and preserving all discovered media in carousel order.
+  It stops at 30 transitions, a repeated state, or a transition with no change.
+  Collection may be incomplete when Instagram's DOM or lazy transition does not
+  expose a slide. Images and videos remain distinct candidates.
 - Instagram video recovery is exact and fail-closed. After a direct media-URL
   download fails, Eagle may ask `yt-dlp` for the original post only when the
   requested 1-based carousel index matches. For multi-video carousels, media ID

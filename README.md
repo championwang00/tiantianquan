@@ -68,9 +68,12 @@ clear, and per-item multi-selection; confirmation processes the selected items
 in their displayed order. A failed item does not discard successful siblings,
 and the result reports `partial_success` with per-item details when applicable.
 
-Instagram posts are collected as complete, ordered carousels by traversing back
-to the first slide and then forward through every slide. Images and videos are
-shown as separate selectable items. For an Instagram video, Eagle first tries
+Instagram collection attempts to traverse back to the first slide and then
+forward through the carousel, preserving all discovered media in order. It
+stops after 30 transitions, a repeated state, or a transition that makes no
+progress; collection can therefore be incomplete if Instagram's DOM or lazy
+loading does not expose a slide. Images and videos are shown as separate
+selectable items. For an Instagram video, Eagle first tries
 the collected media URL. If that fails, its `yt-dlp` fallback is fail-closed: it
 must find the same 1-based carousel position and match the captured identity
 (required when the carousel has multiple videos), duration (within 1 second),
