@@ -1150,12 +1150,16 @@ function syncCandidatesFromResult(target, result) {
 
 function syncPartialSuccessSelection(target, result) {
   if (result.status !== "partial_success" || !Array.isArray(result.items)) return;
-  const failedIds = result.items
-    .filter((item) => item.status === "failed")
-    .map((item) => item.id)
-    .filter(Boolean);
+  const failedIds = failedCandidateIds(result.items);
   if (target === "bear") selectedBearCandidateIds = failedIds;
   else selectedEagleCandidateIds = failedIds;
+}
+
+function failedCandidateIds(items) {
+  return items
+    .filter((item) => item.status === "failed")
+    .map((item) => item.id || item.candidateId)
+    .filter(Boolean);
 }
 
 function renderTargetCandidates(target, result) {

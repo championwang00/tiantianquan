@@ -87,3 +87,16 @@ test("partial success keeps failed candidates selected and removes successful on
   assert.match(popupJs, /item\.status === "failed"/);
   assert.match(popupJs, /syncPartialSuccessSelection\(target, result\)/);
 });
+
+test("Eagle partial results keep failed candidateIds selected and confirmation enabled", () => {
+  const helperSource = popupJs.match(/function failedCandidateIds\(items\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helperSource, "failedCandidateIds helper should exist");
+  const failedCandidateIds = Function(`${helperSource}; return failedCandidateIds;`)();
+  const selected = failedCandidateIds([
+    { candidateId: "saved", status: "success" },
+    { candidateId: "retry", status: "failed" }
+  ]);
+
+  assert.deepEqual(selected, ["retry"]);
+  assert.match(popupJs, /"partial_success".*\.includes\(status\)/s);
+});
