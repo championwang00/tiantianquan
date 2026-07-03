@@ -6,18 +6,37 @@ import { promisify } from "node:util";
 import { parseHTML } from "linkedom";
 
 const execFileAsync = promisify(execFile);
+const CAROUSEL_CACHE_TTL_MS = 5 * 60 * 1000;
+const COOKIE_CACHE_TTL_MS = 15 * 60 * 1000;
+const carouselCache = new Map();
+let cookieCache = null;
+const defaultInstagramDependencies = {
+  fetchAuthenticated: fetchAuthenticatedInstagramCarousel,
+  fetchHtml: fetchInstagramCarouselFromHtml,
+  now: () => Date.now()
+};
+let instagramDependencies = { ...defaultInstagramDependencies };
+
+export function __setInstagramTestHooks(hooks = {}) {
+  instagramDependencies = { ...instagramDependencies, ...hooks };
+}
+
+export function __resetInstagramTestHooks() {
+  instagramDependencies = { ...defaultInstagramDependencies };
+  carouselCache.clear();
+  cookieCache = null;
+}
 
 export async function enrichInstagramPayload(payload) {
   if (!isInstagramPost(payload?.url) || payload.pageAssets?.carousel?.length) return payload;
   try {
-    const args = [
-      ...await resolveCurlProxyArgs(),
-      "-L", "--compressed", "--max-time", "20", "--fail", "--silent", "--show-error", payload.url
-    ];
-    const { stdout } = await execFileAsync("curl", args, { timeout: 25000, maxBuffer: 1024 * 1024 * 8 });
-    let carousel = extractInstagramCarouselFromHtml(stdout, payload.url);
-    if (!carousel.length) carousel = await fetchAuthenticatedInstagramCarousel(payload.url);
+    const shortcode = String(payload.url).match(/\/p\/([^/?#]+)/)?.[1] || "";
+    const cached = carouselCache.get(shortcode);
+    let carousel = cached && cached.expiresAt > instagramDependencies.now() ? cached.carousel : [];
+    if (!carousel.length) carousel = await instagramDependencies.fetchAuthenticated(payload.url);
+    if (!carousel.length) carousel = await instagramDependencies.fetchHtml(payload.url);
     if (!carousel.length) return payload;
+    carouselCache.set(shortcode, { carousel, expiresAt: instagramDependencies.now() + CAROUSEL_CACHE_TTL_MS });
     return {
       ...payload,
       pageAssets: { ...(payload.pageAssets || {}), carousel }
@@ -25,6 +44,15 @@ export async function enrichInstagramPayload(payload) {
   } catch (_error) {
     return payload;
   }
+}
+
+async function fetchInstagramCarouselFromHtml(pageUrl) {
+  const args = [
+    ...await resolveCurlProxyArgs(),
+    "-L", "--compressed", "--max-time", "12", "--fail", "--silent", "--show-error", pageUrl
+  ];
+  const { stdout } = await execFileAsync("curl", args, { timeout: 15000, maxBuffer: 1024 * 1024 * 8 });
+  return extractInstagramCarouselFromHtml(stdout, pageUrl);
 }
 
 export function instagramShortcodeToMediaId(shortcode) {
@@ -51,9 +79,11 @@ async function fetchAuthenticatedInstagramCarousel(pageUrl) {
   const mediaId = instagramShortcodeToMediaId(shortcode);
   if (!mediaId) return [];
   const profile = path.join(os.homedir(), "Library", "Application Support", "Dia", "User Data", "Default");
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-instagram-"));
-  const cookieFile = path.join(tempDir, "cookies.txt");
-  try {
+  let cookies = cookieCache && cookieCache.expiresAt > Date.now() ? cookieCache.cookies : null;
+  if (!cookies) {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-instagram-"));
+    const cookieFile = path.join(tempDir, "cookies.txt");
+    try {
     await execFileAsync("yt-dlp", [
       "--cookies-from-browser", `chrome:${profile}`,
       "--cookies", cookieFile,
@@ -63,17 +93,23 @@ async function fetchAuthenticatedInstagramCarousel(pageUrl) {
       const exported = await fs.stat(cookieFile).then((stat) => stat.size > 0).catch(() => false);
       if (!exported) throw error;
     });
-    const cookies = Object.fromEntries((await fs.readFile(cookieFile, "utf8")).split(/\r?\n/)
+      cookies = Object.fromEntries((await fs.readFile(cookieFile, "utf8")).split(/\r?\n/)
       .filter((line) => line.startsWith(".instagram.com\t"))
       .map((line) => line.split("\t"))
       .filter((parts) => parts.length >= 7)
       .map((parts) => [parts[5], parts[6]]));
+      cookieCache = { cookies, expiresAt: Date.now() + COOKIE_CACHE_TTL_MS };
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  try {
     const proxyArgs = await resolveCurlProxyArgs();
     const variables = JSON.stringify({ mediaId });
     const { stdout } = await execFileAsync("curl", [
       ...proxyArgs,
       "--compressed", "--max-time", "20", "--fail", "--silent", "--show-error",
-      "--cookie", cookieFile,
+      "--header", `Cookie: ${Object.entries(cookies).map(([name, value]) => `${name}=${value}`).join("; ")}`,
       "--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36",
       "--header", "X-IG-App-ID: 936619743392459",
       "--header", "X-ASBD-ID: 129477",
@@ -88,8 +124,9 @@ async function fetchAuthenticatedInstagramCarousel(pageUrl) {
       "https://www.instagram.com/graphql/query"
     ], { timeout: 25000, maxBuffer: 1024 * 1024 * 8 });
     return extractInstagramCarouselFromGraphql(JSON.parse(stdout), shortcode);
-  } finally {
-    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  } catch (error) {
+    cookieCache = null;
+    throw error;
   }
 }
 

@@ -391,6 +391,8 @@ async function buildImportCandidates(payload, metadata) {
       candidates.push(...videoCandidates, ...imageCandidates);
     }
   } else {
+    const videoCandidates = await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "内容视频" });
+    candidates.push(...videoCandidates);
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
     candidates.push(...imageCandidates.slice(0, 6));
   }
@@ -404,7 +406,7 @@ async function buildImportCandidates(payload, metadata) {
 
   if (captureMode === "top-image") {
     const assetUrl = normalizeContentImageUrl(payload.pageMeta?.image || payload.pageAssets?.images?.[0]?.src || "", sourceType);
-    if (assetUrl) {
+    if (assetUrl && !candidates.some((candidate) => candidate.kind === "asset-url" && candidate.assetUrl === assetUrl)) {
       candidates.push(makeCandidate({ kind: "asset-url", sourceType, assetUrl, selected: !hasSelectedCandidate(candidates) }));
     }
   }

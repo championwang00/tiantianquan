@@ -19,6 +19,8 @@ const BEAR_DB_CANDIDATES = [
 
 const defaultBearDependencies = {
   resolveCandidate: resolveBearCandidateAsset,
+  downloadVideo: downloadVideoForBear,
+  convertVideo: convertVideoToGif,
   append: appendToBear,
   addFile: addFileToBear,
   indent: indentBearImageLine,
@@ -38,6 +40,7 @@ export function __resetBearTestHooks() {
 
 export const __testBuildBearDraftParts = buildBearDraftParts;
 export const __testBuildBearCandidates = buildBearCandidates;
+export const __testResolveBearCandidateAsset = resolveBearCandidateAsset;
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
@@ -257,7 +260,26 @@ async function buildBearCandidates(payload, metadata) {
     }
   }
 
-  const imageSourceType = isTwitterUrl(payload.url) ? "twitter" : isXiaohongshuUrl(payload.url) ? "xiaohongshu" : "webpage";
+  if (!isTwitterUrl(payload.url)) {
+    const seenVideos = new Set();
+    for (const [index, video] of (payload.pageAssets?.videos || []).entries()) {
+      const mediaUrl = String(video?.src || "").trim();
+      if (!/^https?:\/\//i.test(mediaUrl) || seenVideos.has(mediaUrl)) continue;
+      seenVideos.add(mediaUrl);
+      candidates.push(makeCandidate({
+        kind: "media-url",
+        sourceType: imageSourceTypeForPayload(payload),
+        mediaUrl,
+        poster: video.poster || "",
+        selected: candidates.length === 0,
+        label: video.label || `页面视频 ${index + 1}`,
+        description: video.label || "",
+        id: `bear-content-video:${index + 1}:${safeShellName(mediaUrl)}`
+      }));
+    }
+  }
+
+  const imageSourceType = imageSourceTypeForPayload(payload);
   const imageCandidates = buildContentImageCandidates(payload, imageSourceType, {
     selectedFirst: !candidates.some((candidate) => candidate.selected),
     labelPrefix: isXiaohongshuUrl(payload.url) ? "小红书图片" : "内容图片"
@@ -426,10 +448,27 @@ async function resolveBearCandidateAsset(candidate, payload, metadata) {
     };
   }
   if (candidate.kind === "media-url" && candidate.mediaUrl) {
-    const asset = await downloadVideoForBear(candidate.mediaUrl, metadata);
-    return { ...asset, kind: "video", label: candidate.label || "视频" };
+    const asset = await bearDependencies.downloadVideo(candidate.mediaUrl, metadata);
+    {
+      try {
+        const gif = await bearDependencies.convertVideo(asset.filePath, metadata);
+        return {
+          ...gif,
+          kind: "gif",
+          label: candidate.label || "GIF",
+          cleanupPaths: [...(gif.cleanupPaths || []), ...(asset.cleanupPaths || [asset.filePath])]
+        };
+      } catch (error) {
+        await bearDependencies.cleanup(asset.cleanupPaths || [asset.filePath]);
+        throw error;
+      }
+    }
   }
   return null;
+}
+
+function imageSourceTypeForPayload(payload) {
+  return isTwitterUrl(payload.url) ? "twitter" : isXiaohongshuUrl(payload.url) ? "xiaohongshu" : isInstagramUrl(payload.url) ? "instagram" : "webpage";
 }
 
 async function downloadVideoForBear(url, metadata) {

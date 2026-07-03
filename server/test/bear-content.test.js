@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, confirmBearWrite } from "../src/adapters/bear.js";
+import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, __testResolveBearCandidateAsset, confirmBearWrite } from "../src/adapters/bear.js";
 
 test.afterEach(() => __resetBearTestHooks());
 
@@ -42,6 +42,31 @@ test("Bear and Eagle can consume the same Instagram carousel media set", async (
   }, { titleZh: "AI OS" });
   assert.deepEqual(candidates.map((item) => item.kind), ["media-url", "asset-url", "asset-url"]);
   assert.deepEqual(candidates.map((item) => item.description), ["Video", "One", "Two"]);
+});
+
+test("all website videos are converted to GIF before Bear attachment", async () => {
+  __setBearTestHooks({
+    downloadVideo: async () => ({ filePath: "/tmp/instagram.mp4", cleanupPaths: ["/tmp/instagram.mp4"] }),
+    convertVideo: async () => ({ filePath: "/tmp/instagram.gif", filename: "instagram.gif", mimeType: "image/gif", cleanupPaths: ["/tmp/instagram.gif"] })
+  });
+  const asset = await __testResolveBearCandidateAsset({
+    kind: "media-url", sourceType: "webpage", mediaUrl: "https://cdn.example/video.mp4", label: "页面视频 1"
+  }, { url: "https://example.com/video" }, { titleZh: "Video" });
+  assert.equal(asset.kind, "gif");
+  assert.equal(asset.mimeType, "image/gif");
+  assert.deepEqual(asset.cleanupPaths, ["/tmp/instagram.gif", "/tmp/instagram.mp4"]);
+});
+
+test("generic websites expose captured videos and images through the same Bear media pipeline", async () => {
+  const candidates = await __testBuildBearCandidates({
+    url: "https://example.com/gallery",
+    pageMeta: {},
+    pageAssets: {
+      videos: [{ src: "https://cdn.example/demo.mp4", poster: "https://cdn.example/demo.jpg", label: "Demo" }],
+      images: [{ src: "https://cdn.example/one.jpg", alt: "One" }]
+    }
+  }, { titleZh: "Gallery" });
+  assert.deepEqual(candidates.map((item) => item.kind), ["media-url", "asset-url"]);
 });
 
 test("materializes selected candidates in candidate order and writes all into one note", async () => {

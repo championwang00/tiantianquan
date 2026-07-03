@@ -5,8 +5,24 @@ import { loadEnv } from "./env.js";
 
 const OPENCLAW_CONFIG = path.join(os.homedir(), ".openclaw", "openclaw.json");
 const PROVIDER_TIMEOUT_MS = 12000;
+const METADATA_CACHE_TTL_MS = 10 * 60 * 1000;
+const metadataCache = new Map();
+const defaultProviderDependencies = { callProvider: callConfiguredProvider, now: () => Date.now() };
+let providerDependencies = { ...defaultProviderDependencies };
+
+export function __setProviderTestHooks(hooks = {}) {
+  providerDependencies = { ...providerDependencies, ...hooks };
+}
+
+export function __resetProviderTestHooks() {
+  providerDependencies = { ...defaultProviderDependencies };
+  metadataCache.clear();
+}
 
 export async function generateClipMetadata(payload, target) {
+  const cacheKey = JSON.stringify([payload.url || "", payload.title || "", payload.pageMeta?.description || "", payload.selectedText || "", payload.userNote || ""]);
+  const cached = metadataCache.get(cacheKey);
+  if (cached && cached.expiresAt > providerDependencies.now()) return cached.metadata;
   const isEagle = target === "eagle";
   const prompt = [
     "你是一个本地网页收藏整理器。请只输出 JSON，不要 Markdown。",
@@ -31,9 +47,11 @@ export async function generateClipMetadata(payload, target) {
   ].join("\n");
 
   try {
-    const text = await withTimeout(callConfiguredProvider(prompt), PROVIDER_TIMEOUT_MS, "Provider metadata generation timed out");
+    const text = await withTimeout(providerDependencies.callProvider(prompt), PROVIDER_TIMEOUT_MS, "Provider metadata generation timed out");
     const parsed = parseJson(text);
-    return sanitizeMetadata(parsed, payload);
+    const metadata = sanitizeMetadata(parsed, payload);
+    metadataCache.set(cacheKey, { metadata, expiresAt: providerDependencies.now() + METADATA_CACHE_TTL_MS });
+    return metadata;
   } catch (error) {
     return {
       titleZh: payload.title || "网页摘录",
@@ -81,10 +99,11 @@ function resolveTestApiKey(value, env) {
 }
 
 function withTimeout(promise, ms, message) {
+  let timer;
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
-  ]);
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })
+  ]).finally(() => clearTimeout(timer));
 }
 
 async function callConfiguredProvider(prompt) {

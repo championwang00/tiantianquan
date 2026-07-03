@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractInstagramCarouselFromGraphql, extractInstagramCarouselFromHtml, instagramShortcodeToMediaId } from "../src/utils/instagram.js";
+import { __resetInstagramTestHooks, __setInstagramTestHooks, enrichInstagramPayload, extractInstagramCarouselFromGraphql, extractInstagramCarouselFromHtml, instagramShortcodeToMediaId } from "../src/utils/instagram.js";
+
+test.afterEach(() => __resetInstagramTestHooks());
 
 test("extracts the complete Instagram carousel from server-fetched Relay HTML", () => {
   const relay = {
@@ -38,4 +40,22 @@ test("decodes an Instagram shortcode and extracts its authenticated GraphQL caro
     { type: "video", src: "https://cdn.example/video.mp4", poster: "https://cdn.example/cover.jpg" },
     { type: "image", src: "https://cdn.example/image.jpg", poster: "" }
   ]);
+});
+
+test("Instagram enrichment uses authenticated data first and reuses a short-lived carousel cache", async () => {
+  let authenticatedCalls = 0;
+  let htmlCalls = 0;
+  const carousel = [{ index: 0, type: "image", src: "https://cdn.example/one.jpg" }];
+  __setInstagramTestHooks({
+    fetchAuthenticated: async () => { authenticatedCalls += 1; return carousel; },
+    fetchHtml: async () => { htmlCalls += 1; return []; },
+    now: () => 1000
+  });
+  const payload = { url: "https://www.instagram.com/p/DaKqRpCCjbf", pageAssets: {} };
+  const first = await enrichInstagramPayload(payload);
+  const second = await enrichInstagramPayload(payload);
+  assert.deepEqual(first.pageAssets.carousel, carousel);
+  assert.deepEqual(second.pageAssets.carousel, carousel);
+  assert.equal(authenticatedCalls, 1);
+  assert.equal(htmlCalls, 0);
 });

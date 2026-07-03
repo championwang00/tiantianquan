@@ -209,6 +209,21 @@ test("Instagram falls back to captured page media when carousel discovery is emp
   assert.equal(media[0].poster, "https://cdn.example/video-cover.jpg");
 });
 
+test("generic websites expose captured videos alongside images", async () => {
+  const candidates = await __testHooks.buildImportCandidates({
+    url: "https://example.com/gallery",
+    options: { eagle: { captureMode: "top-image" } },
+    pageMeta: {},
+    pageAssets: {
+      videos: [{ src: "https://cdn.example/demo.mp4", poster: "https://cdn.example/demo.jpg", label: "Demo" }],
+      images: [{ src: "https://cdn.example/one.jpg", alt: "One" }]
+    },
+    pageContent: {}
+  }, { titleZh: "Gallery" });
+  const media = __testHooks.summarizeCandidates(candidates).filter((item) => ["media-url", "asset-url"].includes(item.kind));
+  assert.deepEqual(media.map((item) => item.kind), ["media-url", "asset-url"]);
+});
+
 test("extracts every Instagram carousel item from embedded Relay data when the post has no article DOM", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);
