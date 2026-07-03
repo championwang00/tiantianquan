@@ -69,6 +69,36 @@ test("falls back to the screenshot candidate when a selected X video import fail
   assert.match(result.fallbackReason, /yt-dlp timed out/);
 });
 
+test("imports selected candidates in canonical order and continues after one fails", async () => {
+  const candidates = [
+    { id: "first", kind: "asset-url" },
+    { id: "second", kind: "asset-url" },
+    { id: "third", kind: "asset-url" }
+  ];
+  const attempts = [];
+  const result = await __testHooks.executeCandidateBatch(candidates, async (candidate) => {
+    attempts.push(candidate.id);
+    if (candidate.id === "second") throw new Error("second exploded");
+    return { candidateId: candidate.id, itemId: `item-${candidate.id}` };
+  });
+
+  assert.deepEqual(attempts, ["first", "second", "third"]);
+  assert.equal(result.succeeded, 2);
+  assert.equal(result.failed, 1);
+  assert.deepEqual(result.items.map((item) => [item.candidateId, item.status]), [
+    ["first", "success"], ["second", "failed"], ["third", "success"]
+  ]);
+  assert.match(result.items[1].reason, /second exploded/);
+});
+
+test("legacy single candidateId resolves as a one-element selection", () => {
+  const candidates = [{ id: "first" }, { id: "second" }, { id: "third" }];
+  assert.deepEqual(
+    __testHooks.normalizeSelectedCandidates({ candidates }, "second").map((candidate) => candidate.id),
+    ["second"]
+  );
+});
+
 test("preserves Instagram carousel order, deduplicates media, and includes carousel metadata", async () => {
   const candidates = await __testHooks.buildImportCandidates({
     url: "https://www.instagram.com/p/ABC123/",

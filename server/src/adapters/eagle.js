@@ -193,16 +193,17 @@ export async function confirmEagleWrite(task, options = {}) {
   }
 
   const beforeIds = await listItemIds();
-  const writtenItems = [];
   let activeBeforeIds = beforeIds;
   const primaryFolder = folders[0];
-
-  for (const candidate of candidates) {
+  const usedCandidateIds = new Set();
+  const batch = await executeCandidateBatch(candidates, async (candidate) => {
     const imported = await importWithFallback(candidate, {
       payload: task.payload,
       writePlan: result.writePlan,
+      excludedCandidateIds: usedCandidateIds,
       importCandidate: (nextCandidate) => importToEagle(nextCandidate, task.payload, metadata, folders, annotation)
     });
+    usedCandidateIds.add(imported.candidate.id);
     const response = imported.response;
     const importedCandidate = imported.candidate;
     const item = await resolveImportedItem(response, activeBeforeIds, task.payload, importedCandidate, metadata, folders);
@@ -222,8 +223,9 @@ export async function confirmEagleWrite(task, options = {}) {
     }
 
     const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, folders, annotation);
-    writtenItems.push({
+    const writtenItem = {
       candidateId: importedCandidate.id,
+      requestedCandidateId: candidate.id,
       itemId,
       folderId: primaryFolder?.id || "",
       folderName: primaryFolder?.name || "",
@@ -232,16 +234,22 @@ export async function confirmEagleWrite(task, options = {}) {
       importPlan: summarizeImportPlan(importedCandidate),
       verification,
       metadataUpdate,
-      fallbackReason: imported.fallbackReason || ""
-    });
+      fallbackReason: imported.fallbackReason || "",
+      __cleanupCandidate: importedCandidate
+    };
     activeBeforeIds = new Set([...activeBeforeIds, itemId]);
-  }
+    return writtenItem;
+  });
+  const writtenItems = batch.items.filter((item) => item.status === "success");
 
-  await revealEagle();
+  if (writtenItems.length) await revealEagle();
   return {
     ...result,
-    status: "success",
-    reason: "Eagle 写入并验证成功",
+    status: batch.failed ? (batch.succeeded ? "partial_success" : "failed") : "success",
+    reason: batch.failed ? `Eagle 写入完成：${batch.succeeded} 个成功，${batch.failed} 个失败` : "Eagle 写入并验证成功",
+    succeeded: batch.succeeded,
+    failed: batch.failed,
+    items: batch.items,
     itemIds: writtenItems.map((item) => item.itemId),
     folderIds: folders.map((folder) => folder.id),
     folders: folders.map((folder) => folder.name),
@@ -259,9 +267,46 @@ export const __testHooks = {
   buildImportCandidates,
   instagramEntryMatchesCandidate,
   importWithFallback,
+  executeCandidateBatch,
+  normalizeSelectedCandidates,
   selectDefaultCandidates,
   summarizeCandidates
 };
+
+async function executeCandidateBatch(candidates, processCandidate) {
+  const items = [];
+  for (const candidate of candidates) {
+    try {
+      const processed = await processCandidate(candidate);
+      const cleanupCandidate = processed?.__cleanupCandidate;
+      if (processed) delete processed.__cleanupCandidate;
+      items.push({ ...processed, candidateId: candidate.id, status: "success", reason: "" });
+      if (cleanupCandidate && cleanupCandidate !== candidate) await cleanupOwnedCandidateAssets(cleanupCandidate);
+    } catch (error) {
+      items.push({ candidateId: candidate.id, status: "failed", reason: error?.message || String(error) });
+    } finally {
+      await cleanupOwnedCandidateAssets(candidate);
+    }
+  }
+  return {
+    succeeded: items.filter((item) => item.status === "success").length,
+    failed: items.filter((item) => item.status === "failed").length,
+    items
+  };
+}
+
+async function cleanupOwnedCandidateAssets(candidate) {
+  const tempRoot = path.resolve(os.tmpdir());
+  const assetRoot = path.join(tempRoot, "chrome-clip-router-assets");
+  const paths = [candidate?.asset?.filePath, candidate?.thumbnail?.filePath].filter(Boolean);
+  await Promise.all(paths.map(async (filePath) => {
+    const resolved = path.resolve(filePath);
+    const owned = resolved.startsWith(`${assetRoot}${path.sep}`)
+      || (resolved.startsWith(`${tempRoot}${path.sep}`) && path.basename(resolved).startsWith("clip-router-"));
+    if (!owned) return;
+    await fs.unlink(resolved).catch(() => {});
+  }));
+}
 
 async function checkEagleReadiness(url) {
   try {
@@ -390,7 +435,7 @@ async function importWithFallback(candidate, context) {
       fallbackReason: ""
     };
   } catch (error) {
-    const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload);
+    const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload, context.excludedCandidateIds);
     if (!fallback) throw error;
     return {
       response: await context.importCandidate(fallback),
@@ -400,14 +445,15 @@ async function importWithFallback(candidate, context) {
   }
 }
 
-function selectFallbackCandidate(candidate, writePlan, payload) {
+function selectFallbackCandidate(candidate, writePlan, payload, excludedCandidateIds = new Set()) {
   if (!["twitter-url", "media-url"].includes(candidate?.kind)) return null;
   const captureMode = payload?.options?.eagle?.captureMode || "screenshot";
   const candidates = Array.isArray(writePlan?.candidates) ? writePlan.candidates : [];
+  const available = (nextCandidate) => nextCandidate.id !== candidate.id && !excludedCandidateIds.has(nextCandidate.id);
   const preferred = selectDefaultCandidates(candidates, captureMode)
-    .find((nextCandidate) => nextCandidate.selected && nextCandidate.id !== candidate.id);
+    .find((nextCandidate) => nextCandidate.selected && available(nextCandidate));
   return preferred || candidates.find((nextCandidate) => {
-    if (nextCandidate.id === candidate.id) return false;
+    if (!available(nextCandidate)) return false;
     return ["screenshot", "html-snapshot", "asset-url", "url"].includes(nextCandidate.kind);
   }) || null;
 }
@@ -1069,7 +1115,7 @@ function normalizeSelectedCandidates(writePlan, candidateIds = [], captureMode =
   const candidates = Array.isArray(writePlan.candidates) && writePlan.candidates.length
     ? writePlan.candidates
     : [writePlan.importPlan].filter(Boolean);
-  const selectedIds = new Set((Array.isArray(candidateIds) ? candidateIds : []).filter(Boolean));
+  const selectedIds = new Set((Array.isArray(candidateIds) ? candidateIds : [candidateIds]).filter(Boolean));
   if (!selectedIds.size && captureMode) {
     return selectDefaultCandidates(candidates, captureMode).filter((candidate) => candidate.selected);
   }
