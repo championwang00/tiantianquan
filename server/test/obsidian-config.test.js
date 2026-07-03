@@ -110,6 +110,27 @@ test("cancels a chunked image body once it exceeds the size cap", async () => {
   assert.equal(cancelled, true);
 });
 
+test("a stalled body timeout leaves the remote URL unchanged and writes no file", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-stalled-"));
+  let cancelled = false;
+  const body = new ReadableStream({
+    pull() { return new Promise(() => {}); },
+    cancel() { cancelled = true; }
+  });
+  const markdown = "![stalled](https://cdn.example/stalled.png)";
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: path.join(dir, "Article.md"),
+    fetchImpl: async () => new Response(body, { headers: { "content-type": "image/png" } }),
+    resolveImpl: publicResolver,
+    timeoutMs: 20
+  });
+
+  assert.equal(localized, markdown);
+  assert.equal(cancelled, true);
+  await assert.rejects(fs.access(path.join(dir, "assets")));
+});
+
 test("preserves optional markdown image titles while localizing", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-title-"));
   const localized = await localizeMarkdownImages({

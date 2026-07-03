@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import dns from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
+import { Readable } from "node:stream";
 import { generateClipMetadata } from "../utils/provider.js";
 import { hostnameFromUrl, safeFileName } from "../utils/webpage.js";
 import { getJournalDate } from "../utils/time.js";
@@ -51,16 +54,14 @@ export async function confirmObsidianWrite(task) {
       writePlan.filePath = filePath;
       writePlan.markdown = await localizeMarkdownImages({
         markdown: writePlan.markdown,
-        noteFilePath: filePath,
-        fetchImpl: globalThis.fetch
+        noteFilePath: filePath
       });
       await fs.writeFile(filePath, writePlan.markdown, "utf8");
     }
   } else {
     writePlan.markdown = await localizeMarkdownImages({
       markdown: writePlan.markdown,
-      noteFilePath: writePlan.filePath,
-      fetchImpl: globalThis.fetch
+      noteFilePath: writePlan.filePath
     });
     await fs.writeFile(writePlan.filePath, writePlan.markdown, "utf8");
   }
@@ -139,12 +140,13 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export async function localizeMarkdownImages({
   markdown,
   noteFilePath,
-  fetchImpl = globalThis.fetch,
-  resolveImpl = defaultResolve
+  fetchImpl,
+  resolveImpl = defaultResolve,
+  timeoutMs = 10_000
 }) {
   const source = String(markdown || "");
   const urls = extractArticleImageUrls(source);
-  if (!urls.length || typeof fetchImpl !== "function") return source;
+  if (!urls.length) return source;
 
   const note = path.parse(noteFilePath);
   const assetDir = path.join(note.dir, "assets", safeFileName(note.name));
@@ -152,7 +154,7 @@ export async function localizeMarkdownImages({
   const usedNames = new Set();
   for (const url of urls) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+    const timer = setTimeout(() => controller.abort(new Error("image download timed out")), timeoutMs);
     try {
       const { response, finalUrl } = await fetchPublicImage(url, fetchImpl, resolveImpl, controller.signal);
       if (!response?.ok) throw new Error(`HTTP ${response?.status || "error"}`);
@@ -200,20 +202,51 @@ async function assertPublicUrl(value, resolveImpl) {
   if (hostname === "localhost" || hostname.endsWith(".localhost")) throw new Error("non-public image host");
   const literal = net.isIP(hostname) ? [{ address: hostname }] : await resolveImpl(hostname);
   if (!literal?.length || literal.some(({ address }) => !isPublicIp(address))) throw new Error("non-public image host");
-  return url;
+  return { url, addresses: literal };
 }
 
 async function fetchPublicImage(initialUrl, fetchImpl, resolveImpl, signal) {
   let current = initialUrl;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
-    await assertPublicUrl(current, resolveImpl);
-    const response = await fetchImpl(current, { redirect: "manual", signal });
+    const validated = await assertPublicUrl(current, resolveImpl);
+    const response = typeof fetchImpl === "function"
+      ? await fetchImpl(current, { redirect: "manual", signal })
+      : await pinnedRequest(validated.url, validated.addresses[0], signal);
     if (![301, 302, 303, 307, 308].includes(response.status)) return { response, finalUrl: current };
     const location = response.headers?.get("location");
     if (!location || redirects === 5) throw new Error("invalid redirect");
     current = new URL(location, current).href;
   }
   throw new Error("too many redirects");
+}
+
+async function pinnedRequest(url, resolved, signal) {
+  const transport = url.protocol === "https:" ? https : http;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  return new Promise((resolve, reject) => {
+    const request = transport.request({
+      protocol: url.protocol,
+      hostname: resolved.address,
+      family: resolved.family || net.isIP(resolved.address),
+      port: url.port || undefined,
+      method: "GET",
+      path: `${url.pathname}${url.search}`,
+      headers: { Host: url.host, Accept: "image/jpeg,image/png,image/gif,image/webp,image/avif" },
+      servername: url.protocol === "https:" ? hostname : undefined
+    }, (incoming) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) value.forEach((item) => headers.append(name, item));
+        else if (value != null) headers.set(name, value);
+      }
+      resolve(new Response(Readable.toWeb(incoming), { status: incoming.statusCode, headers }));
+    });
+    const abort = () => request.destroy(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    request.once("error", reject);
+    request.once("close", () => signal.removeEventListener("abort", abort));
+    request.end();
+  });
 }
 
 async function readLimitedBody(body, maximum, signal) {
@@ -227,6 +260,7 @@ async function readLimitedBody(body, maximum, signal) {
     while (true) {
       if (signal.aborted) throw signal.reason;
       const { done, value } = await reader.read();
+      if (signal.aborted) throw signal.reason;
       if (done) break;
       size += value.byteLength;
       if (size > maximum) {
@@ -235,6 +269,7 @@ async function readLimitedBody(body, maximum, signal) {
       }
       chunks.push(Buffer.from(value));
     }
+    if (signal.aborted) throw signal.reason;
     return Buffer.concat(chunks, size);
   } finally {
     signal.removeEventListener("abort", abort);
