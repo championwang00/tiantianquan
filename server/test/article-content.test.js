@@ -37,3 +37,45 @@ test("supports quotes, ordered lists, fenced code, strong text, and unique image
     "https://cdn.example/b.jpg"
   ]);
 });
+
+test("rejects unsafe link and image protocols", () => {
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <p><a href="file:///tmp/secret">file</a> <a href="ftp://example.com/a">ftp</a>
+      <a href="custom:open">custom</a> <a href="javascript:alert(1)">js</a></p>
+      <img src="data:image/png;base64,x"><img src="blob:https://example.com/id">
+      <img src="/safe.png"><a href="https://example.com/safe">safe</a>
+    </article>`, "https://example.com/post");
+
+  assert.equal(markdown, "file ftp custom js\n\n![](https://example.com/safe.png)\n\n[safe](https://example.com/safe)");
+});
+
+test("extracts only absolute http and https image URLs", () => {
+  assert.deepEqual(extractArticleImageUrls(`
+    ![safe](https://example.com/a.png)
+    ![also safe](http://example.com/b.jpg)
+    ![file](file:///tmp/c.png)
+    ![ftp](ftp://example.com/d.png)
+    ![custom](app:asset)
+    ![relative](/e.png)
+    ![script](javascript:alert)
+  `), ["https://example.com/a.png", "http://example.com/b.jpg"]);
+});
+
+test("escapes hostile markdown text and uses code delimiters longer than content", () => {
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <h2># [Heading] *raw*</h2>
+      <p>Text _with_ [brackets] and <a href="/safe">label ] * x</a>.</p>
+      <img src="/image.png" alt="alt ] * raw">
+      <p><code>a ${"``"} b</code></p>
+      <pre><code class="language-js">const ticks = ${"```"};</code></pre>
+    </article>`, "https://example.com/post");
+
+  assert.ok(markdown.includes("## \\# \\[Heading\\] \\*raw\\*"));
+  assert.ok(markdown.includes("Text \\_with\\_ \\[brackets\\]"));
+  assert.ok(markdown.includes("[label \\] \\* x](https://example.com/safe)"));
+  assert.ok(markdown.includes("![alt \\] \\* raw](https://example.com/image.png)"));
+  assert.ok(markdown.includes("```a `` b```"));
+  assert.ok(markdown.includes("````js\nconst ticks = ```;\n````"));
+});

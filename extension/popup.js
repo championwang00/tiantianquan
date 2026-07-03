@@ -401,10 +401,23 @@ async function collectPageContext(tab, options = {}) {
             || document.querySelector("[role='main'] article")
             || document.querySelector("main");
           if (preferred) return preferred;
-          return [...document.querySelectorAll("section, div")]
-            .filter((node) => (node.innerText || "").trim().length >= 200)
-            .map((node) => ({ node, score: readableScore(node) }))
-            .sort((a, b) => b.score - a.score)[0]?.node || document.body;
+          let bestNode = null;
+          let bestScore = -1;
+          const candidates = document.querySelectorAll("section, div");
+          const limit = Math.min(candidates.length, 500);
+          for (let index = 0; index < limit; index += 1) {
+            const node = candidates[index];
+            const textLength = (node.innerText || "").trim().length;
+            if (textLength < 200) continue;
+            const score = textLength
+              + node.querySelectorAll("p, li, blockquote, pre, h1, h2, h3").length * 180
+              + node.querySelectorAll("img").length * 80;
+            if (score > bestScore) {
+              bestNode = node;
+              bestScore = score;
+            }
+          }
+          return bestNode || document.body;
         }
 
         function findSocialContentRoot(scopeRoot = document) {

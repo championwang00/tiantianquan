@@ -7,16 +7,21 @@ export function articleHtmlToMarkdown(html, baseUrl) {
   document.querySelectorAll("script, style, noscript, nav, footer, template, svg").forEach((node) => node.remove());
 
   const render = (node, context = {}) => {
-    if (node.nodeType === 3) return /^\s*$/.test(node.textContent) ? "" : node.textContent.replace(/\s+/g, " ");
+    if (node.nodeType === 3) {
+      if (/^\s*$/.test(node.textContent)) return context.preserveWhitespace ? " " : "";
+      return escapeMarkdownText(node.textContent.replace(/\s+/g, " "));
+    }
     if (node.nodeType !== 1) return "";
     const tag = node.tagName;
     const children = () => [...node.childNodes].map((child) => render(child, context)).join("");
-    const inline = () => cleanInline(children());
+    const inline = () => cleanInline([...node.childNodes]
+      .map((child) => render(child, { ...context, preserveWhitespace: true }))
+      .join(""));
     if (/^H[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${inline()}\n\n`;
     if (tag === "P") return `${inline()}\n\n`;
     if (tag === "STRONG" || tag === "B") return `**${inline()}**`;
     if (tag === "EM" || tag === "I") return `*${inline()}*`;
-    if (tag === "CODE" && !context.inPre) return `\`${inline()}\``;
+    if (tag === "CODE" && !context.inPre) return inlineCode(node.textContent.replace(/\s+/g, " ").trim());
     if (tag === "A") {
       const label = inline();
       const href = absoluteUrl(node.getAttribute("href"), baseUrl);
@@ -24,14 +29,15 @@ export function articleHtmlToMarkdown(html, baseUrl) {
     }
     if (tag === "IMG") {
       const src = absoluteUrl(node.getAttribute("src") || node.getAttribute("data-src"), baseUrl);
-      return src ? `![${(node.getAttribute("alt") || "").trim()}](${src})\n\n` : "";
+      return src ? `![${escapeMarkdownText((node.getAttribute("alt") || "").trim())}](${src})\n\n` : "";
     }
     if (tag === "BR") return "\n";
     if (tag === "PRE") {
       const code = node.querySelector("code");
       const language = code?.className?.match(/(?:language-|lang-)([\w-]+)/)?.[1] || "";
       const value = (code || node).textContent.replace(/^\n|\n$/g, "");
-      return `\`\`\`${language}\n${value}\n\`\`\`\n\n`;
+      const fence = "`".repeat(Math.max(3, longestBacktickRun(value) + 1));
+      return `${fence}${language}\n${value}\n${fence}\n\n`;
     }
     if (tag === "BLOCKQUOTE") {
       const value = [...node.childNodes].map((child) => render(child, context)).join("").trim();
@@ -61,21 +67,45 @@ export function extractArticleImageUrls(markdown) {
   const urls = [];
   const seen = new Set();
   for (const match of String(markdown || "").matchAll(/!\[[^\]]*\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)/g)) {
-    if (!seen.has(match[1])) {
-      seen.add(match[1]);
-      urls.push(match[1]);
+    const url = safeAbsoluteHttpUrl(match[1]);
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      urls.push(url);
     }
   }
   return urls;
 }
 
 function absoluteUrl(value, baseUrl) {
-  if (!value || /^(?:data|blob|javascript):/i.test(value)) return "";
+  if (!value) return "";
   try {
-    return new URL(value, baseUrl).href;
+    return safeAbsoluteHttpUrl(new URL(value, baseUrl).href);
   } catch {
     return "";
   }
+}
+
+function safeAbsoluteHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function escapeMarkdownText(value) {
+  return value.replace(/([\\`*_[\]{}<>#])/g, "\\$1");
+}
+
+function longestBacktickRun(value) {
+  return Math.max(0, ...[...value.matchAll(/`+/g)].map((match) => match[0].length));
+}
+
+function inlineCode(value) {
+  const fence = "`".repeat(longestBacktickRun(value) + 1);
+  const padding = value.startsWith("`") || value.endsWith("`") ? " " : "";
+  return `${fence}${padding}${value}${padding}${fence}`;
 }
 
 function cleanInline(value) {
