@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import vm from "node:vm";
 import test from "node:test";
 import { __testHooks } from "../src/adapters/eagle.js";
@@ -97,6 +98,50 @@ test("legacy single candidateId resolves as a one-element selection", () => {
     __testHooks.normalizeSelectedCandidates({ candidates }, "second").map((candidate) => candidate.id),
     ["second"]
   );
+});
+
+test("explicit unknown candidate IDs resolve none instead of silently importing the first", () => {
+  const candidates = [{ id: "first" }, { id: "second" }];
+  assert.deepEqual(__testHooks.normalizeSelectedCandidates({ candidates }, ["missing"]), []);
+});
+
+test("fallback never consumes another explicitly selected candidate", async () => {
+  const candidates = [
+    { id: "video-a", kind: "media-url", selected: true },
+    { id: "image-b", kind: "asset-url", selected: true },
+    { id: "url-fallback", kind: "url", selected: false }
+  ];
+  const calls = [];
+  const result = await __testHooks.importWithFallback(candidates[0], {
+    payload: { options: { eagle: { captureMode: "top-image" } } },
+    writePlan: { candidates },
+    excludedCandidateIds: new Set(candidates.filter((candidate) => candidate.selected).map((candidate) => candidate.id)),
+    importCandidate: async (candidate) => {
+      calls.push(candidate.id);
+      if (candidate.id === "video-a") throw new Error("video failed");
+      return { ok: true };
+    }
+  });
+  assert.deepEqual(calls, ["video-a", "url-fallback"]);
+  assert.equal(result.candidate.id, "url-fallback");
+});
+
+test("batch defers and deduplicates owned temp cleanup until every candidate is processed", async () => {
+  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
+  fs.mkdirSync(dir, { recursive: true });
+  const shared = path.join(dir, `batch-shared-${Date.now()}.png`);
+  fs.writeFileSync(shared, "asset");
+  const candidates = [
+    { id: "first", asset: { filePath: shared } },
+    { id: "second", asset: { filePath: shared } }
+  ];
+  const observed = [];
+  await __testHooks.executeCandidateBatch(candidates, async (candidate) => {
+    observed.push([candidate.id, fs.existsSync(shared)]);
+    return { itemId: candidate.id };
+  });
+  assert.deepEqual(observed, [["first", true], ["second", true]]);
+  assert.equal(fs.existsSync(shared), false);
 });
 
 test("preserves Instagram carousel order, deduplicates media, and includes carousel metadata", async () => {

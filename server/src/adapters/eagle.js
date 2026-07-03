@@ -195,7 +195,7 @@ export async function confirmEagleWrite(task, options = {}) {
   const beforeIds = await listItemIds();
   let activeBeforeIds = beforeIds;
   const primaryFolder = folders[0];
-  const usedCandidateIds = new Set();
+  const usedCandidateIds = new Set(candidates.map((candidate) => candidate.id));
   const batch = await executeCandidateBatch(candidates, async (candidate) => {
     const imported = await importWithFallback(candidate, {
       payload: task.payload,
@@ -239,7 +239,7 @@ export async function confirmEagleWrite(task, options = {}) {
     };
     activeBeforeIds = new Set([...activeBeforeIds, itemId]);
     return writtenItem;
-  });
+  }, result.writePlan.candidates || candidates);
   const writtenItems = batch.items.filter((item) => item.status === "success");
 
   if (writtenItems.length) await revealEagle();
@@ -273,20 +273,23 @@ export const __testHooks = {
   summarizeCandidates
 };
 
-async function executeCandidateBatch(candidates, processCandidate) {
+async function executeCandidateBatch(candidates, processCandidate, assetsToCleanup = candidates) {
   const items = [];
-  for (const candidate of candidates) {
-    try {
-      const processed = await processCandidate(candidate);
-      const cleanupCandidate = processed?.__cleanupCandidate;
-      if (processed) delete processed.__cleanupCandidate;
-      items.push({ ...processed, candidateId: candidate.id, status: "success", reason: "" });
-      if (cleanupCandidate && cleanupCandidate !== candidate) await cleanupOwnedCandidateAssets(cleanupCandidate);
-    } catch (error) {
-      items.push({ candidateId: candidate.id, status: "failed", reason: error?.message || String(error) });
-    } finally {
-      await cleanupOwnedCandidateAssets(candidate);
+  const cleanupCandidates = new Set(assetsToCleanup);
+  try {
+    for (const candidate of candidates) {
+      try {
+        const processed = await processCandidate(candidate);
+        const cleanupCandidate = processed?.__cleanupCandidate;
+        if (cleanupCandidate) cleanupCandidates.add(cleanupCandidate);
+        if (processed) delete processed.__cleanupCandidate;
+        items.push({ ...processed, candidateId: candidate.id, status: "success", reason: "" });
+      } catch (error) {
+        items.push({ candidateId: candidate.id, status: "failed", reason: error?.message || String(error) });
+      }
     }
+  } finally {
+    await cleanupOwnedCandidateAssets([...cleanupCandidates]);
   }
   return {
     succeeded: items.filter((item) => item.status === "success").length,
@@ -295,10 +298,11 @@ async function executeCandidateBatch(candidates, processCandidate) {
   };
 }
 
-async function cleanupOwnedCandidateAssets(candidate) {
+async function cleanupOwnedCandidateAssets(candidateOrCandidates) {
   const tempRoot = path.resolve(os.tmpdir());
   const assetRoot = path.join(tempRoot, "chrome-clip-router-assets");
-  const paths = [candidate?.asset?.filePath, candidate?.thumbnail?.filePath].filter(Boolean);
+  const candidates = Array.isArray(candidateOrCandidates) ? candidateOrCandidates : [candidateOrCandidates];
+  const paths = [...new Set(candidates.flatMap((candidate) => [candidate?.asset?.filePath, candidate?.thumbnail?.filePath]).filter(Boolean))];
   await Promise.all(paths.map(async (filePath) => {
     const resolved = path.resolve(filePath);
     const owned = resolved.startsWith(`${assetRoot}${path.sep}`)
@@ -1122,6 +1126,7 @@ function normalizeSelectedCandidates(writePlan, candidateIds = [], captureMode =
   const selected = selectedIds.size
     ? candidates.filter((candidate) => selectedIds.has(candidate.id))
     : candidates.filter((candidate) => candidate.selected);
+  if (selectedIds.size) return selected;
   return selected.length ? selected : candidates.slice(0, 1);
 }
 

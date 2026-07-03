@@ -108,9 +108,7 @@ export function createRouter(env) {
         const task = await confirmTaskBear(bearConfirmMatch[1], {
           draft: body.draft,
           includeScreenshot: body.includeScreenshot !== false,
-          candidateIds: Array.isArray(body.candidateIds)
-            ? body.candidateIds.filter((id) => typeof id === "string")
-            : []
+          candidateIds: normalizeCandidateIds(body)
         });
         if (!task) {
           sendJson(res, 404, { error: "Task not found" }, headers);
@@ -128,9 +126,7 @@ export function createRouter(env) {
           folderIds: Array.isArray(body.folderIds)
             ? body.folderIds.filter((id) => typeof id === "string")
             : [body.folderId].filter((id) => typeof id === "string"),
-          candidateIds: Array.isArray(body.candidateIds)
-            ? body.candidateIds.filter((id) => typeof id === "string")
-            : []
+          candidateIds: normalizeCandidateIds(body)
         });
         if (!task) {
           sendJson(res, 404, { error: "Task not found" }, headers);
@@ -160,6 +156,13 @@ export function createRouter(env) {
     }
   };
 }
+
+function normalizeCandidateIds(body = {}) {
+  const value = body.candidateIds ?? body.candidateId;
+  return (Array.isArray(value) ? value : [value]).filter((id) => typeof id === "string" && id.length > 0);
+}
+
+export const __testHooks = { normalizeCandidateIds };
 
 function corsHeaders(env, origin) {
   const allowed = env.CLIP_ROUTER_ALLOWED_EXTENSION_ID || "*";
