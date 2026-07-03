@@ -245,3 +245,58 @@ test("carousel traversal starts at first, orders and dedupes assets, stops at en
   ]);
   assert.equal(position, 1);
 });
+
+test("carousel traversal applies independent 30-step backward and forward caps", async () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);
+  const slides = Array.from({ length: 90 }, (_, index) => [{ type: "image", src: `slide-${index}` }]);
+  let position = 45;
+  let previousClicks = 0;
+  let nextClicks = 0;
+  const assets = await context.globalThis.traverseInstagramCarousel({
+    read: () => slides[position],
+    signature: () => slides[position][0].src,
+    clickPrevious: () => { previousClicks += 1; position -= 1; return true; },
+    clickNext: () => { nextClicks += 1; position += 1; return true; },
+    waitForChange: async () => slides[position][0].src,
+    maxTransitions: 30
+  });
+  assert.equal(previousClicks, 30);
+  assert.equal(nextClicks, 30);
+  assert.equal(assets.length, 31);
+  assert.equal(assets[0].src, "slide-15");
+  assert.equal(assets.at(-1).src, "slide-45");
+});
+
+test("carousel restoration is bounded and falls back to the opposite direction", async () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);
+  let position = 1;
+  let collecting = true;
+  let restorePreviousClicks = 0;
+  let restoreNextClicks = 0;
+  const slides = ["first", "initial", "last"];
+  const result = await context.globalThis.traverseInstagramCarousel({
+    read: () => [{ type: "image", src: slides[position] }],
+    signature: () => slides[position],
+    clickPrevious: () => {
+      if (position === 1) { position = 0; return true; }
+      if (position === 2) { collecting = false; restorePreviousClicks += 1; position = 0; return true; }
+      if (!collecting) restorePreviousClicks += 1;
+      return false;
+    },
+    clickNext: () => {
+      if (!collecting) restoreNextClicks += 1;
+      if (position >= 2) return false;
+      position += 1;
+      return true;
+    },
+    waitForChange: async () => slides[position],
+    maxTransitions: 30
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)).map((asset) => asset.src), slides);
+  assert.equal(position, 1);
+  assert.ok(restorePreviousClicks <= 30);
+  assert.ok(restoreNextClicks <= 30);
+  assert.equal(restoreNextClicks, 1);
+});
