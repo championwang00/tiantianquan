@@ -56,7 +56,6 @@ async function init() {
     card.querySelector(".channel-summary").addEventListener("click", () => toggleCard(card.dataset.target));
     card.querySelector('[data-role="confirm"]').addEventListener("click", () => confirmChannel(card.dataset.target));
   }
-  for (const target of ["eagle", "bear"]) bindCandidateToolbar(target);
   document.querySelector("#eagleCaptureMode").addEventListener("change", () => refreshIfOpen("eagle"));
   document.querySelector("#bearScreenshotToggle").addEventListener("change", persistCurrentOptions);
   await prepareOpenTargets().catch((error) => {
@@ -1022,7 +1021,7 @@ function renderField(field, target = "") {
   } else if (field.kind === "candidate-list" && Array.isArray(field.value)) {
     value.className += " candidate-list";
     for (const candidate of field.value) {
-      value.append(renderCandidate(candidate));
+      value.append(renderMediaGridCard(candidate, target));
     }
   } else {
     value.textContent = field.value || "-";
@@ -1142,31 +1141,42 @@ function renderTargetCandidates(target, result) {
   const panel = getCard(target).querySelector('[data-role="candidates"]');
   if (!panel) return;
   withScrollPreserved(() => {
-    const list = panel.querySelector(".candidate-list");
     const candidates = getCandidatesFromResult(result);
-    const selectedCount = getSelectedCandidateIds(target).length;
-    const count = panel.querySelector('[data-role="candidate-count"]');
-    if (count) count.textContent = `已读取 ${candidates.length} 项 · 已选 ${selectedCount} 项`;
-    const selectAll = panel.querySelector('[data-action="select-all"]');
-    const clear = panel.querySelector('[data-action="clear-selection"]');
-    if (selectAll) selectAll.disabled = !candidates.length || selectedCount === candidates.length;
-    if (clear) clear.disabled = selectedCount === 0;
-    if (!candidates.length) {
-      list.className = "candidate-list candidate-list-empty";
-      list.textContent = result.status === "running" || result.status === "queued"
-        ? "正在生成可收录素材..."
-        : "没有识别到可单独收录的素材。";
-      return;
-    }
-    list.className = "candidate-list";
-    list.replaceChildren(...candidates.map((candidate) => renderMediaGridCard(candidate, target)));
+    panel.replaceChildren(renderCandidateGrid(target, candidates, result.status));
   });
 }
 
-function bindCandidateToolbar(target) {
-  const panel = getCard(target).querySelector('[data-role="candidates"]');
-  panel?.querySelector('[data-action="select-all"]')?.addEventListener("click", () => setCandidateSelection(target, true));
-  panel?.querySelector('[data-action="clear-selection"]')?.addEventListener("click", () => setCandidateSelection(target, false));
+function renderCandidateGrid(target, candidates, status = "") {
+  const root = el("div", "candidate-grid-shell", "");
+  const selectedCount = getSelectedCandidateIds(target).length;
+  const head = el("div", "candidate-head", "");
+  const count = el("span", "candidate-count", `已读取 ${candidates.length} 项 · 已选 ${selectedCount} 项`);
+  count.dataset.role = "candidate-count";
+  const tools = el("span", "candidate-tools", "");
+  const selectAll = el("button", "", "全选");
+  selectAll.type = "button";
+  selectAll.dataset.action = "select-all";
+  selectAll.disabled = !candidates.length || selectedCount === candidates.length;
+  selectAll.addEventListener("click", () => setCandidateSelection(target, true));
+  const clear = el("button", "", "清空");
+  clear.type = "button";
+  clear.dataset.action = "clear-selection";
+  clear.disabled = selectedCount === 0;
+  clear.addEventListener("click", () => setCandidateSelection(target, false));
+  tools.append(selectAll, clear);
+  head.append(count, tools);
+  root.append(head);
+
+  if (!candidates.length) {
+    root.append(el("div", "candidate-grid-empty", status === "running" || status === "queued"
+      ? "正在生成可收录素材..."
+      : "没有识别到可单独收录的素材。"));
+    return root;
+  }
+  const grid = el("div", "candidate-grid", "");
+  grid.replaceChildren(...candidates.map((candidate) => renderMediaGridCard(candidate, target)));
+  root.append(grid);
+  return root;
 }
 
 function setCandidateSelection(target, selectAll) {
@@ -1350,10 +1360,6 @@ function renderMediaGridCard(candidate, target = "eagle") {
   check.setAttribute("aria-hidden", "true");
   button.append(check);
   return button;
-}
-
-function renderCandidate(candidate, target = "eagle") {
-  return renderMediaGridCard(candidate, target);
 }
 
 function renderCandidatePreview(candidate) {

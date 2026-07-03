@@ -88,13 +88,13 @@
   font-size: var(--type-label-medium-size);
 }
 
-.candidate-list {
+.candidate-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-s2);
 }
 
-.candidate-list-empty {
+.candidate-grid-empty {
   display: block;
 }
 
@@ -184,7 +184,7 @@
 
 .media-badges {
   position: absolute;
-  top: var(--space-s1);
+  bottom: var(--space-s1);
   left: var(--space-s1);
   z-index: 2;
   display: flex;
@@ -1654,7 +1654,7 @@ button,
 }
 
 /* Keep the media-grid contract above later legacy candidate styles. */
-.candidate-panel .candidate-list:not(.candidate-list-empty) {
+.candidate-panel .candidate-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
