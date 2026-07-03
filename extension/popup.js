@@ -473,12 +473,15 @@ async function collectPageContext(tab, options = {}) {
           const root = document.querySelector('main article') || document.querySelector('article');
           if (!root) return [];
           const initialMedia = [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside')).sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight))[0];
-          const carouselViewport = initialMedia?.parentElement;
-          if (!carouselViewport) return [];
+          const carouselRoot = initialMedia ? [...function* ancestors(node) { for (let current = node.parentElement; current && current !== root; current = current.parentElement) yield current; }(initialMedia)].find((node) => node.querySelector('[role="button"], button')) || initialMedia.parentElement : null;
+          if (!carouselRoot) return [];
+          const activeMedia = () => [...carouselRoot.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')).map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ rect }) => rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0]?.node || null;
           const items = new Map();
           const read = () => {
-            const viewport = carouselViewport.getBoundingClientRect();
-            for (const node of [...carouselViewport.querySelectorAll('video, img')].filter((item) => {
+            const active = activeMedia(); if (!active) return;
+            const viewportNode = active.parentElement;
+            const viewport = viewportNode.getBoundingClientRect();
+            for (const node of [...viewportNode.querySelectorAll('video, img')].filter((item) => {
               if (item.closest('header, nav, aside, [role="dialog"], [role="complementary"]')) return false;
               const rect = item.getBoundingClientRect();
               return rect.width >= 240 && rect.height >= 240 && rect.left >= viewport.left - 2 && rect.right <= viewport.right + 2 && rect.top >= viewport.top - 2 && rect.bottom <= viewport.bottom + 2;
@@ -488,13 +491,14 @@ async function collectPageContext(tab, options = {}) {
               const normalized = absolutize(src);
               if (!normalized || normalized.startsWith('data:')) continue;
               const key = `${isVideo ? 'video' : 'image'}:${normalized}`;
-              if (!items.has(key)) items.set(key, { index: items.size, type: isVideo ? 'video' : 'image', src: normalized, poster: isVideo ? absolutize(node.poster || '') : '', mediaId: node.getAttribute('data-media-id') || node.closest('[data-media-id]')?.getAttribute('data-media-id') || normalized.match(/(?:media|video)[_\/-](\d{5,})/i)?.[1] || '', duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0, width: node.videoWidth || node.naturalWidth || node.clientWidth || 0, height: node.videoHeight || node.naturalHeight || node.clientHeight || 0 });
+              if (!items.has(key)) items.set(key, { index: items.size, type: isVideo ? 'video' : 'image', src: normalized, poster: isVideo ? absolutize(node.poster || '') : '', mediaId: node.getAttribute('data-media-id') || node.getAttribute('data-id') || node.closest('[data-media-id], [data-id]')?.getAttribute('data-media-id') || node.closest('[data-media-id], [data-id]')?.getAttribute('data-id') || normalized.match(/(?:media|video)[_\/-](\d{5,})/i)?.[1] || (() => { try { return new URL(normalized).searchParams.get('id') || ''; } catch (_error) { return ''; } })(), duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0, width: node.videoWidth || node.naturalWidth || node.clientWidth || 0, height: node.videoHeight || node.naturalHeight || node.clientHeight || 0 });
             }
           };
-          const signature = () => [...root.querySelectorAll('video, img')].map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ node, rect }) => !node.closest('header, nav') && rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height).map(({ node }) => node.currentSrc || node.src || node.poster || '').find(Boolean) || '';
+          const signature = () => { const node = activeMedia(); return node?.currentSrc || node?.src || node?.poster || ''; };
           const control = (direction) => {
-            const viewport = carouselViewport.getBoundingClientRect();
-            const buttons = [...carouselViewport.parentElement.querySelectorAll('[role="button"], button')].filter((button) => { const rect = button.getBoundingClientRect(); return rect.width > 0 && rect.right >= viewport.left && rect.left <= viewport.right && rect.bottom >= viewport.top && rect.top <= viewport.bottom; });
+            const active = activeMedia(); if (!active) return null;
+            const viewport = active.parentElement.getBoundingClientRect();
+            const buttons = [...carouselRoot.querySelectorAll('[role="button"], button')].filter((button) => { const rect = button.getBoundingClientRect(); return rect.width > 0 && rect.right >= viewport.left && rect.left <= viewport.right && rect.bottom >= viewport.top && rect.top <= viewport.bottom; });
             const words = direction === 'next' ? /next|下一|次へ|다음/i : /previous|prev|上一|前へ|이전/i;
             return buttons.find((button) => words.test(`${button.getAttribute('aria-label') || ''} ${button.querySelector('svg title')?.textContent || ''}`)) || buttons.find((button) => { const rect = button.getBoundingClientRect(); return button.querySelector('svg') && rect.width <= 64 && rect.height <= 64 && (direction === 'next' ? rect.left > viewport.left + viewport.width * .65 : rect.right < viewport.left + viewport.width * .35); });
           };

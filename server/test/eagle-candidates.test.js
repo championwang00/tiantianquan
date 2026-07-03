@@ -143,12 +143,14 @@ test("carousel traversal starts at first, orders and dedupes assets, stops at en
     [{ type: "image", src: "last" }]
   ];
   let position = 1;
+  let wrapper = { connected: true, assets: slides[position] };
+  const replaceWrapper = (next) => { wrapper.connected = false; position = next; wrapper = { connected: true, assets: slides[position] }; };
   const transition = async (before) => slides[position][0].src === before ? "" : slides[position][0].src;
   const assets = await traverse({
-    read: () => slides[position].filter((asset) => !asset.excluded),
+    read: () => wrapper.connected ? wrapper.assets.filter((asset) => !asset.excluded) : [],
     signature: () => slides[position][0].src,
-    clickPrevious: () => position > 0 ? (position -= 1, true) : false,
-    clickNext: () => position < slides.length - 1 ? (position += 1, true) : false,
+    clickPrevious: () => position > 0 ? (replaceWrapper(position - 1), true) : false,
+    clickNext: () => position < slides.length - 1 ? (replaceWrapper(position + 1), true) : false,
     waitForChange: transition
   });
   assert.deepEqual(JSON.parse(JSON.stringify(assets)).map(({ src, index }) => ({ src, index })), [
