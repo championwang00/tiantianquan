@@ -188,6 +188,96 @@ test("Instagram carousel IDs do not change when signed CDN URLs rotate", async (
   assert.equal(first[0].id, second[0].id);
 });
 
+test("extracts every Instagram carousel item from embedded Relay data when the post has no article DOM", () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);
+  const embedded = JSON.stringify({
+    require: [["RelayPrefetchedStreamCache", "next", [], [{
+      result: { data: { xig_polaris_media: {
+        code: "DaKqRpCCjbf",
+        if_not_gated_logged_out: {
+          code: "DaKqRpCCjbf",
+          carousel_media: [
+            {
+              __typename: "XIGPolarisVideoMedia",
+              media_type: 2,
+              pk: "video-pk",
+              code: "video-code",
+              display_uri: "https://cdn.example/video-cover.jpg",
+              original_width: 1080,
+              original_height: 1350,
+              accessibility_caption: "Animated AI OS interface",
+              video_versions: [{ url: "https://cdn.example/video.mp4", width: 720, height: 900 }]
+            },
+            {
+              __typename: "XIGPolarisImageMedia",
+              media_type: 1,
+              pk: "image-1",
+              code: "image-code-1",
+              display_uri: "https://cdn.example/image-1.jpg",
+              original_width: 1024,
+              original_height: 1280,
+              accessibility_caption: "AI radio interface"
+            },
+            {
+              __typename: "XIGPolarisImageMedia",
+              media_type: 1,
+              pk: "image-2",
+              code: "image-code-2",
+              image_versions2: { candidates: [{ url: "https://cdn.example/image-2.jpg", width: 1024, height: 1280 }] },
+              accessibility_caption: "AI search interface"
+            }
+          ]
+        }
+      } } }
+    }]]]
+  });
+
+  const assets = context.globalThis.extractInstagramEmbeddedCarousel(
+    ["not json", embedded],
+    "https://www.instagram.com/p/DaKqRpCCjbf?img_index=1&utm_source=muzli"
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(assets)), [
+    {
+      index: 0,
+      type: "video",
+      src: "https://cdn.example/video.mp4",
+      poster: "https://cdn.example/video-cover.jpg",
+      mediaId: "video-pk",
+      shortcode: "video-code",
+      description: "Animated AI OS interface",
+      duration: 0,
+      width: 1080,
+      height: 1350
+    },
+    {
+      index: 1,
+      type: "image",
+      src: "https://cdn.example/image-1.jpg",
+      poster: "",
+      mediaId: "image-1",
+      shortcode: "image-code-1",
+      description: "AI radio interface",
+      duration: 0,
+      width: 1024,
+      height: 1280
+    },
+    {
+      index: 2,
+      type: "image",
+      src: "https://cdn.example/image-2.jpg",
+      poster: "",
+      mediaId: "image-2",
+      shortcode: "image-code-2",
+      description: "AI search interface",
+      duration: 0,
+      width: 1024,
+      height: 1280
+    }
+  ]);
+});
+
 test("Instagram fallback accepts only the exact playlist index and captured video metadata", () => {
   const candidate = { carouselIndex: 3, duration: 8.2, width: 1080, height: 1920 };
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, candidate), true);
@@ -195,6 +285,20 @@ test("Instagram fallback accepts only the exact playlist index and captured vide
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ playlist_index: 4, duration: 21, width: 1080, height: 1920 }, candidate), false);
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ id: "video-b", playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, { ...candidate, carouselVideoCount: 2, mediaId: "video-a" }), false);
   assert.equal(__testHooks.instagramEntryMatchesCandidate({ id: "video-a", playlist_index: 4, duration: 8.1, width: 1080, height: 1920 }, { ...candidate, carouselVideoCount: 2, mediaId: "video-a" }), true);
+});
+
+test("reads the active macOS HTTPS proxy for yt-dlp media downloads", () => {
+  assert.equal(__testHooks.parseMacProxy(`
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7897
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7897
+  HTTPSProxy : 127.0.0.1
+}`), "http://127.0.0.1:7897");
+  assert.equal(__testHooks.parseMacProxy("HTTPEnable : 0\nHTTPSEnable : 1\nHTTPSPort : 7897\nHTTPSProxy : 127.0.0.1"), "http://127.0.0.1:7897");
+  assert.equal(__testHooks.parseMacProxy("HTTPSEnable : 0\nHTTPSPort : 7897\nHTTPSProxy : 127.0.0.1"), "");
 });
 
 test("background and popup Instagram capture keep transition, cap, restoration, and semantic scope safeguards", () => {

@@ -151,6 +151,7 @@ async function collectPageContextInBackground(tab, options = {}) {
       args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
       func: async ({ fullContent, deepAssets }) => {
         const traverseCarousel = globalThis.traverseInstagramCarousel;
+        const extractEmbeddedCarousel = globalThis.extractInstagramEmbeddedCarousel;
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
@@ -275,6 +276,8 @@ async function collectPageContextInBackground(tab, options = {}) {
 
         async function collectInstagramCarousel() {
           if (!/^\/p\//.test(location.pathname) || !/(^|\.)instagram\.com$/.test(location.hostname)) return [];
+          const embedded = extractEmbeddedCarousel?.([...document.scripts].map((script) => script.textContent || ""), location.href) || [];
+          if (embedded.length) return embedded;
           const root = document.querySelector('main article') || document.querySelector('article');
           if (!root) return [];
           const activeMedia = () => [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')).map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ rect }) => rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0]?.node || null;

@@ -352,6 +352,7 @@ async function collectPageContext(tab, options = {}) {
       args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
       func: async ({ fullContent, deepAssets }) => {
         const traverseCarousel = globalThis.traverseInstagramCarousel;
+        const extractEmbeddedCarousel = globalThis.extractInstagramEmbeddedCarousel;
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
@@ -476,6 +477,8 @@ async function collectPageContext(tab, options = {}) {
 
         async function collectInstagramCarousel() {
           if (!/^\/p\//.test(location.pathname) || !/(^|\.)instagram\.com$/.test(location.hostname)) return [];
+          const embedded = extractEmbeddedCarousel?.([...document.scripts].map((script) => script.textContent || ""), location.href) || [];
+          if (embedded.length) return embedded;
           const root = document.querySelector('main article') || document.querySelector('article');
           if (!root) return [];
           const activeMedia = () => [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')).map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ rect }) => rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0]?.node || null;
@@ -1383,6 +1386,7 @@ function renderMediaGridCard(candidate, target = "eagle") {
   button.className = `candidate-option${checked ? " is-selected" : ""}`;
   button.dataset.candidateId = candidate.id;
   button.dataset.gridTarget = target;
+  button.dataset.tooltip = buildCandidateTooltip(candidate);
   button.setAttribute("aria-pressed", String(checked));
   button.setAttribute("aria-label", `${checked ? "取消选择" : "选择"}${candidateTitle(candidate)}`);
   button.addEventListener("click", () => {
@@ -1400,13 +1404,7 @@ function renderMediaGridCard(candidate, target = "eagle") {
     setCardConfirmState(target);
   });
 
-  const body = document.createElement("span");
-  body.className = "candidate-body";
-  const title = document.createElement("strong");
-  title.textContent = candidateTitle(candidate);
-  body.append(title);
-
-  button.append(renderCandidatePreview(candidate), body);
+  button.append(renderCandidatePreview(candidate));
   const check = el("span", "candidate-check", "✓");
   check.setAttribute("aria-hidden", "true");
   button.append(check);
@@ -1431,11 +1429,12 @@ function renderCandidatePreview(candidate) {
   }
 
   if (candidate.kind === "media-url" && candidate.mediaUrl) {
-    if (candidate.thumbnailPath) {
+    if (candidate.thumbnailPath || candidate.poster) {
       const image = document.createElement("img");
       image.className = "candidate-image";
       image.alt = `${candidateTitle(candidate)}首帧`;
-      image.src = buildPreviewAssetUrl(candidate.thumbnailPath);
+      image.src = candidate.thumbnailPath ? buildPreviewAssetUrl(candidate.thumbnailPath) : candidate.poster;
+      if (!candidate.thumbnailPath) image.referrerPolicy = "no-referrer";
       wrap.append(image, renderVideoBadges(candidate));
       return wrap;
     }
@@ -1467,12 +1466,11 @@ function renderCandidatePreview(candidate) {
       image.referrerPolicy = "no-referrer";
       wrap.append(image);
     }
-    const text = document.createElement("span");
-    text.className = "candidate-preview-text";
-    text.textContent = candidate.kind === "twitter-gif"
-      ? "确认写入 Bear 时再下载并转换为 GIF。"
-      : "确认收录时再下载完整视频，可显著加快预览生成。";
-    wrap.append(text, renderVideoBadges(candidate));
+    if (!wrap.childNodes.length) {
+      const icon = el("span", "candidate-preview-icon candidate-preview-video-icon", "▶");
+      wrap.append(icon);
+    }
+    wrap.append(renderVideoBadges(candidate));
     return wrap;
   }
 
@@ -1533,6 +1531,15 @@ function candidateTitle(candidate) {
     url: "URL 书签"
   };
   return names[candidate.kind] || candidate.label || "素材";
+}
+
+function buildCandidateTooltip(candidate) {
+  const parts = [candidateTitle(candidate)];
+  const description = String(candidate.description || candidate.label || "").trim();
+  if (description && description !== parts[0]) parts.push(description);
+  if (Number(candidate.width) > 0 && Number(candidate.height) > 0) parts.push(`${candidate.width} × ${candidate.height}`);
+  if (Number(candidate.duration) > 0) parts.push(`时长 ${formatDuration(candidate.duration)}`);
+  return parts.join(" · ");
 }
 
 function setStatus(message) {

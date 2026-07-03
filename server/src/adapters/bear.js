@@ -284,6 +284,7 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
         assetUrl: src,
         selected: Boolean(options.selectedFirst && index === 0),
         label: image.alt || `${options.labelPrefix || "内容图片"} ${index + 1}`,
+        description: image.alt || "",
         id: `bear-content-image:${index + 1}:${safeShellName(src)}`,
         width: image.width || 0,
         height: image.height || 0
@@ -338,6 +339,7 @@ function summarizeCandidates(candidates = []) {
     thumbnailPath: candidate.thumbnail?.filePath || candidate.thumbnailPath || "",
     thumbnailFilename: candidate.thumbnail?.filename || candidate.thumbnailFilename || "",
     label: candidate.label || bearCandidateLabel(candidate),
+    description: candidate.description || "",
     selected: Boolean(candidate.selected),
     width: candidate.width || 0,
     height: candidate.height || 0

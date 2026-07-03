@@ -269,6 +269,7 @@ export const __testHooks = {
   importWithFallback,
   executeCandidateBatch,
   normalizeSelectedCandidates,
+  parseMacProxy,
   selectDefaultCandidates,
   summarizeCandidates
 };
@@ -521,11 +522,13 @@ function buildInstagramCarouselCandidates(payload) {
       poster: asset.poster || "",
       selected: true,
       label: `Instagram ${type === "video" ? "视频" : "图片"} ${index + 1}`,
+      description: String(asset.description || "").trim(),
       id: `instagram:${shortcode}:${index}:${type}`,
       carouselIndex: index,
       postUrl: payload.url,
       duration: Number(asset.duration || 0),
       mediaId: asset.mediaId || "",
+      shortcode: asset.shortcode || "",
       carouselVideoCount,
       width: Number(asset.width || 0),
       height: Number(asset.height || 0)
@@ -552,6 +555,7 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
         assetUrl: src,
         selected: Boolean(options.selectedFirst && index === 0),
         label: image.alt || `${options.labelPrefix || "内容图片"} ${index + 1}`,
+        description: image.alt || "",
         id: `content-image:${index + 1}:${safeShellName(src)}`,
         width: image.width || 0,
         height: image.height || 0
@@ -576,6 +580,7 @@ function buildContentVideoCandidates(payload, sourceType, options = {}) {
         poster: video.poster || "",
         selected: Boolean(options.selectedFirst && index === 0),
         label: video.label || `${options.labelPrefix || "内容视频"} ${index + 1}`,
+        description: video.label || "",
         id: `content-video:${index + 1}:${safeShellName(src)}`
       });
     })
@@ -735,6 +740,7 @@ function isTwitterDefaultOgImage(parsedUrl) {
 async function downloadTwitterMedia(url, metadata) {
   const outputTemplate = path.join(os.tmpdir(), `clip-router-eagle-${Date.now()}-${safeShellName(metadata.titleZh || "twitter-media")}.%(ext)s`);
   const args = [
+    ...await resolveYtDlpProxyArgs(),
     "--no-playlist",
     "--merge-output-format",
     "mp4",
@@ -759,6 +765,7 @@ async function downloadTwitterMedia(url, metadata) {
 
 async function hasTwitterDownloadableVideo(url) {
   const { stdout } = await execFileAsync("yt-dlp", [
+    ...await resolveYtDlpProxyArgs(),
     "--no-playlist",
     "--skip-download",
     "--print",
@@ -778,6 +785,7 @@ async function hasTwitterDownloadableVideo(url) {
 async function downloadMediaUrl(mediaUrl, metadata, sourceType = "media") {
   const outputTemplate = path.join(os.tmpdir(), `clip-router-eagle-${Date.now()}-${safeShellName(metadata.titleZh || `${sourceType}-media`)}.%(ext)s`);
   const args = [
+    ...await resolveYtDlpProxyArgs(),
     "--no-playlist",
     "--merge-output-format",
     "mp4",
@@ -805,6 +813,7 @@ async function captureTwitterThumbnail(url, metadata) {
   await fs.mkdir(dir, { recursive: true });
   const outputTemplate = path.join(dir, `clip-router-thumb-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.%(ext)s`);
   const args = [
+    ...await resolveYtDlpProxyArgs(),
     "--no-playlist",
     "--skip-download",
     "--write-thumbnail",
@@ -893,7 +902,8 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
 
 async function downloadInstagramCarouselVideo(postUrl, candidate, metadata) {
   const carouselIndex = candidate.carouselIndex;
-  const { stdout: jsonText } = await execFileAsync("yt-dlp", ["--skip-download", "--dump-single-json", postUrl], { timeout: 30000, maxBuffer: 1024 * 1024 * 8 });
+  const proxyArgs = await resolveYtDlpProxyArgs();
+  const { stdout: jsonText } = await execFileAsync("yt-dlp", [...proxyArgs, "--skip-download", "--dump-single-json", postUrl], { timeout: 30000, maxBuffer: 1024 * 1024 * 8 });
   const info = JSON.parse(jsonText);
   const entries = Array.isArray(info.entries) ? info.entries : [info];
   const entry = entries.find((item) => Number(item?.playlist_index) === carouselIndex + 1);
@@ -902,6 +912,7 @@ async function downloadInstagramCarouselVideo(postUrl, candidate, metadata) {
   }
   const outputTemplate = path.join(os.tmpdir(), `clip-router-instagram-${carouselIndex}-${Date.now()}-${safeShellName(metadata.titleZh || "video")}.%(ext)s`);
   const { stdout } = await execFileAsync("yt-dlp", [
+    ...proxyArgs,
     "--playlist-items", String(carouselIndex + 1),
     "--merge-output-format", "mp4",
     "-f", "bv*+ba/b",
@@ -921,6 +932,36 @@ function instagramEntryMatchesCandidate(entry, candidate) {
   return close(entry.duration, candidate.duration, 1)
     && close(entry.width, candidate.width, 4)
     && close(entry.height, candidate.height, 4);
+}
+
+async function resolveYtDlpProxyArgs() {
+  const configured = process.env.CLIP_ROUTER_PROXY_URL
+    || process.env.HTTPS_PROXY
+    || process.env.https_proxy
+    || process.env.HTTP_PROXY
+    || process.env.http_proxy
+    || process.env.ALL_PROXY
+    || process.env.all_proxy;
+  if (configured) return ["--proxy", configured];
+  if (process.platform !== "darwin") return [];
+  try {
+    const { stdout } = await execFileAsync("/usr/sbin/scutil", ["--proxy"], { timeout: 3000, maxBuffer: 1024 * 128 });
+    const proxy = parseMacProxy(stdout);
+    return proxy ? ["--proxy", proxy] : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function parseMacProxy(text) {
+  const value = String(text || "");
+  for (const prefix of ["HTTPS", "HTTP"]) {
+    const enabled = value.match(new RegExp(`(?:^|\\n)\\s*${prefix}Enable\\s*:\\s*(\\d+)`))?.[1] === "1";
+    const host = value.match(new RegExp(`(?:^|\\n)\\s*${prefix}Proxy\\s*:\\s*([^\\s]+)`))?.[1] || "";
+    const port = value.match(new RegExp(`(?:^|\\n)\\s*${prefix}Port\\s*:\\s*(\\d+)`))?.[1] || "";
+    if (enabled && host && port) return `http://${host}:${port}`;
+  }
+  return "";
 }
 
 async function downloadRemoteAsset(assetUrl, metadata, sourceType = "asset") {
@@ -1062,6 +1103,8 @@ function summarizeImportPlan(importPlan) {
     carouselIndex: importPlan.carouselIndex,
     postUrl: importPlan.postUrl || "",
     mediaId: importPlan.mediaId || "",
+    shortcode: importPlan.shortcode || "",
+    description: importPlan.description || "",
     reason: importPlan.reason || ""
   };
 }

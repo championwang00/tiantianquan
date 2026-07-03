@@ -59,15 +59,18 @@ test("grid visuals are three-column, square, keyboard-visible and motion-safe", 
   assert.doesNotMatch(popupCss, /transition:\s*all\b/);
 });
 
-test("video tiles are opt-in playback with duration and play affordances", () => {
+test("all website media grids show only media, with video corner badges and hover tips", () => {
   assert.match(popupJs, /video\.muted = true/);
   assert.match(popupJs, /video\.playsInline = true/);
   assert.match(popupJs, /video\.autoplay = false/);
   assert.match(popupJs, /media-play-badge/);
   assert.match(popupJs, /media-duration-badge/);
-  assert.match(popupCss, /--candidate-caption-height:/);
-  assert.match(popupCss, /\.candidate-body\s*\{[^}]*min-height:\s*var\(--candidate-caption-height\)/s);
-  assert.match(popupCss, /\.media-badges\s*\{[^}]*bottom:\s*calc\(var\(--candidate-caption-height\) \+ var\(--space-s1\)\)/s);
+  assert.doesNotMatch(popupJs, /candidate-body/);
+  assert.match(popupJs, /dataset\.tooltip/);
+  assert.match(popupCss, /\.candidate-option::after/);
+  assert.match(popupCss, /\.candidate-option:hover::after/);
+  assert.match(popupCss, /\.candidate-option:focus-visible::after/);
+  assert.match(popupCss, /\.media-badges\s*\{[^}]*bottom:\s*var\(--space-s1\)/s);
   assert.doesNotMatch(popupCss, /\.media-badges\s*\{[^}]*top:/s);
 });
 
