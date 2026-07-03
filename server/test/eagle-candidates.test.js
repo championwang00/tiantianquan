@@ -188,6 +188,27 @@ test("Instagram carousel IDs do not change when signed CDN URLs rotate", async (
   assert.equal(first[0].id, second[0].id);
 });
 
+test("Instagram falls back to captured page media when carousel discovery is empty", async () => {
+  const candidates = await __testHooks.buildImportCandidates({
+    url: "https://www.instagram.com/p/DaKqRpCCjbf?img_index=1",
+    options: { eagle: { captureMode: "screenshot" } },
+    pageMeta: { image: "https://cdn.example/video-cover.jpg" },
+    pageAssets: {
+      carousel: [],
+      videos: [{ src: "https://cdn.example/video.mp4", poster: "https://cdn.example/video-cover.jpg", label: "AI OS video" }],
+      images: [
+        { src: "https://cdn.example/video-cover.jpg", alt: "AI OS cover", width: 1080, height: 1350 },
+        { src: "https://cdn.example/slide-2.jpg", alt: "AI OS slide 2", width: 1080, height: 1350 }
+      ]
+    },
+    pageContent: {}
+  }, { titleZh: "AI OS" });
+
+  const media = __testHooks.summarizeCandidates(candidates).filter((candidate) => ["media-url", "asset-url"].includes(candidate.kind));
+  assert.deepEqual(media.map((candidate) => candidate.kind), ["media-url", "asset-url"]);
+  assert.equal(media[0].poster, "https://cdn.example/video-cover.jpg");
+});
+
 test("extracts every Instagram carousel item from embedded Relay data when the post has no article DOM", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);

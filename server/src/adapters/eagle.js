@@ -380,7 +380,16 @@ async function buildImportCandidates(payload, metadata) {
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
     candidates.push(...imageCandidates);
   } else if (sourceType === "instagram") {
-    candidates.push(...buildInstagramCarouselCandidates(payload));
+    const carouselCandidates = buildInstagramCarouselCandidates(payload);
+    if (carouselCandidates.length) {
+      candidates.push(...carouselCandidates);
+    } else {
+      const videoCandidates = await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "Instagram 视频" });
+      const videoPosters = new Set(videoCandidates.map((candidate) => candidate.poster).filter(Boolean));
+      const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: !videoCandidates.length, labelPrefix: "Instagram 图片" })
+        .filter((candidate) => !videoPosters.has(candidate.assetUrl));
+      candidates.push(...videoCandidates, ...imageCandidates);
+    }
   } else {
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
     candidates.push(...imageCandidates.slice(0, 6));

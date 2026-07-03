@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractInstagramCarouselFromHtml } from "../src/utils/instagram.js";
+import { extractInstagramCarouselFromGraphql, extractInstagramCarouselFromHtml, instagramShortcodeToMediaId } from "../src/utils/instagram.js";
 
 test("extracts the complete Instagram carousel from server-fetched Relay HTML", () => {
   const relay = {
@@ -19,5 +19,23 @@ test("extracts the complete Instagram carousel from server-fetched Relay HTML", 
     { type: "video", src: "https://cdn.example/video.mp4" },
     { type: "image", src: "https://cdn.example/one.jpg" },
     { type: "image", src: "https://cdn.example/two.jpg" }
+  ]);
+});
+
+test("decodes an Instagram shortcode and extracts its authenticated GraphQL carousel", () => {
+  assert.equal(instagramShortcodeToMediaId("DaKqRpCCjbf"), "3930139555076388575");
+  const response = {
+    data: { xdt_api__v1__media__media_id_web_info: { items: [{
+      code: "DaKqRpCCjbf",
+      carousel_media: [
+        { media_type: 1, pk: "v1", code: "video", image_versions2: { candidates: [{ url: "https://cdn.example/cover.jpg", width: 1080, height: 1350 }] }, video_versions: [{ url: "https://cdn.example/video.mp4", width: 720, height: 900 }] },
+        { media_type: 1, pk: "i1", code: "image", image_versions2: { candidates: [{ url: "https://cdn.example/image.jpg", width: 1080, height: 1350 }] } }
+      ]
+    }] } }
+  };
+  const assets = extractInstagramCarouselFromGraphql(response, "DaKqRpCCjbf");
+  assert.deepEqual(assets.map(({ type, src, poster }) => ({ type, src, poster })), [
+    { type: "video", src: "https://cdn.example/video.mp4", poster: "https://cdn.example/cover.jpg" },
+    { type: "image", src: "https://cdn.example/image.jpg", poster: "" }
   ]);
 });

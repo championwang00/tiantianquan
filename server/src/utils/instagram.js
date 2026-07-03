@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { parseHTML } from "linkedom";
 
@@ -12,7 +15,8 @@ export async function enrichInstagramPayload(payload) {
       "-L", "--compressed", "--max-time", "20", "--fail", "--silent", "--show-error", payload.url
     ];
     const { stdout } = await execFileAsync("curl", args, { timeout: 25000, maxBuffer: 1024 * 1024 * 8 });
-    const carousel = extractInstagramCarouselFromHtml(stdout, payload.url);
+    let carousel = extractInstagramCarouselFromHtml(stdout, payload.url);
+    if (!carousel.length) carousel = await fetchAuthenticatedInstagramCarousel(payload.url);
     if (!carousel.length) return payload;
     return {
       ...payload,
@@ -20,6 +24,72 @@ export async function enrichInstagramPayload(payload) {
     };
   } catch (_error) {
     return payload;
+  }
+}
+
+export function instagramShortcodeToMediaId(shortcode) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  let value = 0n;
+  for (const character of String(shortcode || "")) {
+    const digit = alphabet.indexOf(character);
+    if (digit < 0) return "";
+    value = value * 64n + BigInt(digit);
+  }
+  return value ? value.toString() : "";
+}
+
+export function extractInstagramCarouselFromGraphql(response, shortcode) {
+  const items = response?.data?.xdt_api__v1__media__media_id_web_info?.items;
+  const post = Array.isArray(items) ? items.find((item) => item?.code === shortcode) || items[0] : null;
+  const media = Array.isArray(post?.carousel_media) ? post.carousel_media : post ? [post] : [];
+  return media.map(normalizeMedia).filter(Boolean);
+}
+
+async function fetchAuthenticatedInstagramCarousel(pageUrl) {
+  if (process.platform !== "darwin") return [];
+  const shortcode = String(pageUrl || "").match(/\/p\/([^/?#]+)/)?.[1] || "";
+  const mediaId = instagramShortcodeToMediaId(shortcode);
+  if (!mediaId) return [];
+  const profile = path.join(os.homedir(), "Library", "Application Support", "Dia", "User Data", "Default");
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-instagram-"));
+  const cookieFile = path.join(tempDir, "cookies.txt");
+  try {
+    await execFileAsync("yt-dlp", [
+      "--cookies-from-browser", `chrome:${profile}`,
+      "--cookies", cookieFile,
+      "--skip-download",
+      "https://www.instagram.com/"
+    ], { timeout: 30000, maxBuffer: 1024 * 1024 * 2 }).catch(async (error) => {
+      const exported = await fs.stat(cookieFile).then((stat) => stat.size > 0).catch(() => false);
+      if (!exported) throw error;
+    });
+    const cookies = Object.fromEntries((await fs.readFile(cookieFile, "utf8")).split(/\r?\n/)
+      .filter((line) => line.startsWith(".instagram.com\t"))
+      .map((line) => line.split("\t"))
+      .filter((parts) => parts.length >= 7)
+      .map((parts) => [parts[5], parts[6]]));
+    const proxyArgs = await resolveCurlProxyArgs();
+    const variables = JSON.stringify({ mediaId });
+    const { stdout } = await execFileAsync("curl", [
+      ...proxyArgs,
+      "--compressed", "--max-time", "20", "--fail", "--silent", "--show-error",
+      "--cookie", cookieFile,
+      "--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36",
+      "--header", "X-IG-App-ID: 936619743392459",
+      "--header", "X-ASBD-ID: 129477",
+      "--header", "X-FB-LSD: AVqbxe3J_YA",
+      "--header", `X-CSRFToken: ${cookies.csrftoken || ""}`,
+      "--header", "X-FB-Friendly-Name: PolarisPostActionLoadPostQueryMediaIdQuery",
+      "--header", `Referer: ${pageUrl}`,
+      "--data-urlencode", "__user=0",
+      "--data-urlencode", `av=${cookies.ds_user_id || ""}`,
+      "--data-urlencode", "doc_id=27211511638502089",
+      "--data-urlencode", `variables=${variables}`,
+      "https://www.instagram.com/graphql/query"
+    ], { timeout: 25000, maxBuffer: 1024 * 1024 * 8 });
+    return extractInstagramCarouselFromGraphql(JSON.parse(stdout), shortcode);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -47,8 +117,8 @@ export function extractInstagramCarouselFromHtml(html, pageUrl) {
 }
 
 function normalizeMedia(media, index) {
-  const isVideo = Number(media?.media_type) === 2 || /VideoMedia/i.test(String(media?.__typename || ""));
   const videos = Array.isArray(media?.video_versions) ? media.video_versions : [];
+  const isVideo = videos.length > 0 || Number(media?.media_type) === 2 || /VideoMedia/i.test(String(media?.__typename || ""));
   const video = videos.slice().sort(byArea)[0];
   const images = Array.isArray(media?.image_versions2?.candidates) ? media.image_versions2.candidates : [];
   const image = images.slice().sort(byArea)[0];
