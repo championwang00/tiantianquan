@@ -46,7 +46,7 @@ test("localizes unique remote markdown images beside the note", async () => {
     "![two](<https://cdn.example/photo_(1).jpg>)"
   ].join("\n");
 
-  const localized = await localizeMarkdownImages({ markdown, noteFilePath, fetchImpl });
+  const localized = await localizeMarkdownImages({ markdown, noteFilePath, fetchImpl, resolveImpl: publicResolver });
 
   assert.deepEqual(calls, ["https://cdn.example/a", "https://cdn.example/photo_(1).jpg"]);
   assert.equal(localized, [
@@ -64,9 +64,77 @@ test("leaves a remote image URL unchanged when its download fails", async () => 
   const localized = await localizeMarkdownImages({
     markdown,
     noteFilePath: path.join(vaultPath, "Article.md"),
-    fetchImpl: async () => { throw new Error("offline"); }
+    fetchImpl: async () => { throw new Error("offline"); },
+    resolveImpl: publicResolver
   });
   assert.equal(localized, markdown);
+});
+
+const publicResolver = async () => [{ address: "93.184.216.34", family: 4 }];
+
+test("rejects private image hosts and private redirect targets before requesting them", async () => {
+  const calls = [];
+  const resolveImpl = async (host) => [{ address: host === "private.example" ? "127.0.0.1" : "93.184.216.34", family: 4 }];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return new Response(null, { status: 302, headers: { location: "http://private.example/secret.png" } });
+  };
+  const markdown = "![direct](http://localhost/a.png)\n![redirect](https://public.example/a.png)";
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: "/tmp/Article.md",
+    fetchImpl,
+    resolveImpl
+  });
+
+  assert.equal(localized, markdown);
+  assert.deepEqual(calls, ["https://public.example/a.png"]);
+});
+
+test("cancels a chunked image body once it exceeds the size cap", async () => {
+  let cancelled = false;
+  const chunk = new Uint8Array(6 * 1024 * 1024);
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(chunk); controller.enqueue(chunk); },
+    cancel() { cancelled = true; }
+  });
+  const markdown = "![large](https://cdn.example/large.png)";
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: "/tmp/Article.md",
+    fetchImpl: async () => new Response(body, { headers: { "content-type": "image/png" } }),
+    resolveImpl: publicResolver
+  });
+
+  assert.equal(localized, markdown);
+  assert.equal(cancelled, true);
+});
+
+test("preserves optional markdown image titles while localizing", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-title-"));
+  const localized = await localizeMarkdownImages({
+    markdown: '![diagram](https://cdn.example/a.png "A title")',
+    noteFilePath: path.join(dir, "Article.md"),
+    fetchImpl: async () => new Response(Buffer.from([1]), { headers: { "content-type": "image/png" } }),
+    resolveImpl: publicResolver
+  });
+  assert.equal(localized, '![diagram](assets/Article/a.png "A title")');
+});
+
+test("rejects HTML and SVG responses without leaving asset files", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-mime-"));
+  const markdown = "![html](https://cdn.example/a.png)\n![svg](https://cdn.example/b.svg)";
+  let count = 0;
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: path.join(dir, "Article.md"),
+    fetchImpl: async () => new Response(Buffer.from("unsafe"), {
+      headers: { "content-type": count++ === 0 ? "text/html" : "image/svg+xml" }
+    }),
+    resolveImpl: publicResolver
+  });
+  assert.equal(localized, markdown);
+  await assert.rejects(fs.access(path.join(dir, "assets")));
 });
 
 test("resolves a configured mynote/Clippings path against the Document vault root", () => {
