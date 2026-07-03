@@ -349,6 +349,7 @@ async function collectPageContext(tab, options = {}) {
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
         const article = findReadableRoot(mainTweetRoot);
+        const structuredArticle = mainTweetRoot || findArticleRoot();
         const visibleText = getVisibleText(article);
         const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 20 : 6);
         const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 10) : [];
@@ -357,9 +358,10 @@ async function collectPageContext(tab, options = {}) {
           ? {
               text: (visibleText || getVisibleText(document.body)).slice(0, 60000),
               markdown: nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000),
+              articleHtml: structuredArticle?.outerHTML?.slice(0, 240000) || "",
               htmlSnapshot: `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000)
             }
-          : { text: "", markdown: "", htmlSnapshot: "" };
+          : { text: "", markdown: "", articleHtml: "", htmlSnapshot: "" };
         return {
           meta: {
             description: metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
@@ -390,6 +392,17 @@ async function collectPageContext(tab, options = {}) {
             ...document.querySelectorAll("article, main, [role='main'], .article, .post, .entry-content, .markdown-body, .content")
           ].filter(Boolean);
           return candidates
+            .map((node) => ({ node, score: readableScore(node) }))
+            .sort((a, b) => b.score - a.score)[0]?.node || document.body;
+        }
+
+        function findArticleRoot() {
+          const preferred = document.querySelector("article")
+            || document.querySelector("[role='main'] article")
+            || document.querySelector("main");
+          if (preferred) return preferred;
+          return [...document.querySelectorAll("section, div")]
+            .filter((node) => (node.innerText || "").trim().length >= 200)
             .map((node) => ({ node, score: readableScore(node) }))
             .sort((a, b) => b.score - a.score)[0]?.node || document.body;
         }
