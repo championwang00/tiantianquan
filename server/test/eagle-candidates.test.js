@@ -135,6 +135,16 @@ test("background and popup Instagram capture keep transition, cap, restoration, 
   }
 });
 
+test("MV3 collectors inject the shared traversal file before use and never use dynamic code evaluation", () => {
+  for (const relative of ["../../extension/background.js", "../../extension/popup.js"]) {
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, relative), "utf8");
+    const injection = source.indexOf('files: ["instagramCarousel.js"]');
+    const collector = source.indexOf("const traverseCarousel = globalThis.traverseInstagramCarousel", injection);
+    assert.ok(injection >= 0 && collector > injection);
+    assert.doesNotMatch(source, /\beval\s*\(|new\s+Function\b/);
+  }
+});
+
 test("carousel traversal starts at first, orders and dedupes assets, stops at end, and restores a middle slide", async () => {
   const context = { globalThis: {} };
   vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);

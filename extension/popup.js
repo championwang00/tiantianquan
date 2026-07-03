@@ -341,11 +341,15 @@ async function collectPageContext(tab, options = {}) {
   if (!tab?.id) return emptyPageContext();
 
   try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["instagramCarousel.js"]
+    });
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true, carouselTraversalSource: traverseInstagramCarousel.toString() }],
-      func: async ({ fullContent, deepAssets, carouselTraversalSource }) => {
-        const traverseCarousel = (0, eval)(`(${carouselTraversalSource})`);
+      args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
+      func: async ({ fullContent, deepAssets }) => {
+        const traverseCarousel = globalThis.traverseInstagramCarousel;
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
