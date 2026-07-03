@@ -68,6 +68,160 @@
   color: var(--color-surface-on-surface);
 }
 
+/* Shared Eagle/Bear media selector */
+.candidate-grid-shell {
+  display: grid;
+  gap: var(--space-s2);
+}
+
+.candidate-head {
+  align-items: center;
+}
+
+.candidate-tools {
+  display: flex;
+  gap: var(--space-s1);
+}
+
+.candidate-tools button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: var(--space-s1) var(--space-s2);
+  border: 1px solid var(--color-surface-outline-variant);
+  background: var(--color-surface-surface-container-low);
+  color: var(--color-surface-on-surface);
+  font-size: var(--type-label-medium-size);
+}
+
+.candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-s2);
+}
+
+.candidate-grid-empty {
+  display: block;
+}
+
+.candidate-option {
+  --candidate-caption-height: 40px;
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: var(--shape-radius-8);
+  padding: 0;
+  background: var(--color-surface-surface-container);
+  color: var(--color-surface-on-surface);
+  box-shadow: var(--ring-outline);
+  transition: border-color var(--duration-short) ease, box-shadow var(--duration-short) ease;
+}
+
+.candidate-option.is-selected {
+  border-color: var(--color-schemes-primary);
+  box-shadow: 0 0 0 2px var(--color-state-primary-12);
+}
+
+.candidate-option:focus-visible {
+  outline: 3px solid var(--color-schemes-secondary-container);
+  outline-offset: 2px;
+}
+
+.candidate-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.candidate-image,
+.candidate-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.candidate-body {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  display: block;
+  min-height: var(--candidate-caption-height);
+  padding: 18px var(--space-s2) var(--space-s1);
+  background: linear-gradient(transparent, rgba(9, 9, 11, 0.78));
+  color: white;
+  text-align: left;
+}
+
+.candidate-body strong {
+  display: block;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-check {
+  position: absolute;
+  top: var(--space-s1);
+  right: var(--space-s1);
+  z-index: 3;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 2px solid white;
+  border-radius: var(--shape-radius-full);
+  background: rgba(9, 9, 11, 0.48);
+  color: transparent;
+  font-size: 12px;
+}
+
+.candidate-option.is-selected .candidate-check {
+  background: var(--color-schemes-primary);
+  color: white;
+}
+
+.media-badges {
+  position: absolute;
+  bottom: calc(var(--candidate-caption-height) + var(--space-s1));
+  left: var(--space-s1);
+  z-index: 2;
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.media-play-badge,
+.media-duration-badge {
+  border-radius: var(--shape-radius-4);
+  padding: 2px 4px;
+  background: rgba(9, 9, 11, 0.68);
+  color: white;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+@media (hover: hover) {
+  .candidate-option:hover:not(:disabled) {
+    box-shadow: 0 0 0 2px var(--color-state-primary-12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .candidate-option,
+  .candidate-tools button {
+    transition-duration: 0.01ms;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1504,4 +1658,35 @@ button,
   .preview-label {
     padding-top: var(--space-s0);
   }
+}
+
+/* Keep the media-grid contract above later legacy candidate styles. */
+.candidate-panel .candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.candidate-panel .candidate-option {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  aspect-ratio: 1;
+  overflow: hidden;
+  padding: 0;
+}
+
+.candidate-panel .candidate-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.candidate-panel .candidate-image,
+.candidate-panel .candidate-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }

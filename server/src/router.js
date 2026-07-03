@@ -2,6 +2,7 @@ import { confirmTaskBear, confirmTaskEagle, confirmTaskObsidian, createTask, get
 import { listEagleFolders } from "./adapters/eagle.js";
 import { envFilePath } from "./utils/env.js";
 import { testProviderSettings } from "./utils/provider.js";
+import { normalizeSourceUrl } from "./utils/webpage.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -107,9 +108,7 @@ export function createRouter(env) {
         const task = await confirmTaskBear(bearConfirmMatch[1], {
           draft: body.draft,
           includeScreenshot: body.includeScreenshot !== false,
-          candidateIds: Array.isArray(body.candidateIds)
-            ? body.candidateIds.filter((id) => typeof id === "string")
-            : []
+          candidateIds: normalizeCandidateIds(body)
         });
         if (!task) {
           sendJson(res, 404, { error: "Task not found" }, headers);
@@ -127,9 +126,7 @@ export function createRouter(env) {
           folderIds: Array.isArray(body.folderIds)
             ? body.folderIds.filter((id) => typeof id === "string")
             : [body.folderId].filter((id) => typeof id === "string"),
-          candidateIds: Array.isArray(body.candidateIds)
-            ? body.candidateIds.filter((id) => typeof id === "string")
-            : []
+          candidateIds: normalizeCandidateIds(body)
         });
         if (!task) {
           sendJson(res, 404, { error: "Task not found" }, headers);
@@ -159,6 +156,13 @@ export function createRouter(env) {
     }
   };
 }
+
+function normalizeCandidateIds(body = {}) {
+  const value = body.candidateIds ?? body.candidateId;
+  return (Array.isArray(value) ? value : [value]).filter((id) => typeof id === "string" && id.length > 0);
+}
+
+export const __testHooks = { normalizeCandidateIds };
 
 function corsHeaders(env, origin) {
   const allowed = env.CLIP_ROUTER_ALLOWED_EXTENSION_ID || "*";
@@ -278,7 +282,8 @@ function validatePayload(payload) {
 
   return {
     source: payload.source || "chrome-extension",
-    url: payload.url,
+    captureUrl: payload.url,
+    url: normalizeSourceUrl(payload.url),
     title: payload.title || payload.url,
     selectedText: payload.selectedText || "",
     userNote: payload.userNote || "",

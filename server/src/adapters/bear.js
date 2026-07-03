@@ -7,6 +7,7 @@ import { generateClipMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { hostnameFromUrl } from "../utils/webpage.js";
 import { loadEnv } from "../utils/env.js";
+import { articleHtmlToMarkdown } from "../utils/article.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BEAR_NOTE_ID = "";
@@ -15,6 +16,27 @@ const BEAR_DB_CANDIDATES = [
   path.join(os.homedir(), "Library", "Group Containers", "9K33E3U3T4.net.shinyfrog.bear", "Application Data", "Bear.sqlite"),
   path.join(os.homedir(), "Library", "Containers", "net.shinyfrog.bear", "Data", "Documents", "Application Data", "database.sqlite")
 ];
+
+const defaultBearDependencies = {
+  resolveCandidate: resolveBearCandidateAsset,
+  append: appendToBear,
+  addFile: addFileToBear,
+  indent: indentBearImageLine,
+  verify: verifyBearUrl,
+  cleanup: cleanupOwnedPaths,
+  wait
+};
+let bearDependencies = { ...defaultBearDependencies };
+
+export function __setBearTestHooks(hooks = {}) {
+  bearDependencies = { ...bearDependencies, ...hooks };
+}
+
+export function __resetBearTestHooks() {
+  bearDependencies = { ...defaultBearDependencies };
+}
+
+export const __testBuildBearDraftParts = buildBearDraftParts;
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
@@ -52,43 +74,79 @@ async function confirmBearWriteInner(task, options) {
   }
 
   const includeScreenshot = options.includeScreenshot !== false;
-  const selectedAssets = includeScreenshot ? await resolveSelectedBearAssets(task, options) : [];
+  const resolution = includeScreenshot ? await resolveSelectedBearAssets(task, options) : { assets: [], items: [] };
+  const selectedAssets = resolution.assets;
+  try {
   const draft = includeScreenshot
     ? buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets).full
     : (result.draftNoScreenshot || buildBearDraftParts(task.payload, result.metadata || {}, null).full);
   if (includeScreenshot && selectedAssets.length) {
     const draftParts = buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets);
-    await appendToBear(draftParts.beforeImage);
+    await bearDependencies.append(draftParts.beforeImage);
     for (const asset of selectedAssets) {
-      await addFileToBear(asset.filePath, asset.filename);
-      await wait(900);
-      await indentBearImageLine(asset.filename);
+      const item = resolution.items.find((entry) => entry.asset === asset);
+      try {
+        await bearDependencies.addFile(asset.filePath, asset.filename);
+        if (item) item.status = "success";
+        await bearDependencies.wait(900);
+        try {
+          await bearDependencies.indent(asset.filename);
+        } catch (error) {
+          if (item) item.warnings = [...(item.warnings || []), { stage: "indent", error: error.message }];
+        }
+      } catch (error) {
+        if (item) {
+          item.status = "failed";
+          item.error = error.message;
+        }
+      }
     }
-    await appendToBear(draftParts.afterImage);
+    await bearDependencies.append(draftParts.afterImage);
   } else {
-    await appendToBear(draft);
+    await bearDependencies.append(draft);
   }
-  await wait(1800);
-  const verification = await verifyBearUrl(task.payload.url, includeScreenshot ? selectedAssets.map((asset) => asset.filename) : []);
-  const mediaOk = !includeScreenshot || !selectedAssets.length || verification.imageRefCount >= selectedAssets.length;
+  await bearDependencies.wait(1800);
+  const successfulAssets = resolution.items.filter((item) => item.status === "success").map((item) => item.asset);
+  const verification = await bearDependencies.verify(task.payload.url, includeScreenshot ? successfulAssets.map((asset) => asset.filename) : []);
+  const mediaOk = !includeScreenshot || !successfulAssets.length || verification.imageRefCount >= successfulAssets.length;
+  const itemResults = resolution.items.map(({ asset: _asset, ...item }) => item);
+  const succeeded = itemResults.filter((item) => item.status === "success").length;
+  const failed = itemResults.filter((item) => item.status === "failed").length;
   if (verification.count < 1 || !mediaOk) {
     return {
       ...result,
       status: "failed",
       reason: verification.count < 1 ? "Bear x-callback 已调用，但 SQLite 未验证到 URL" : "Bear 已写入 URL，但未验证到媒体引用",
-      verification
+      verification,
+      succeeded,
+      failed,
+      items: itemResults
     };
   }
 
+  const total = succeeded + failed;
+  const status = failed ? (succeeded ? "partial_success" : "failed") : "success";
+  const reason = failed
+    ? (succeeded
+      ? `Bear 笔记已保存，附件 ${succeeded}/${total} 个成功，${failed} 个失败`
+      : `Bear 笔记已保存，但附件 0/${total} 个成功，${failed} 个失败`)
+    : "Bear 写入并验证成功";
   return {
     ...result,
-    status: "success",
-    reason: "Bear 写入并验证成功",
+    status,
+    reason,
     writtenAt: new Date().toISOString(),
     screenshotFile: selectedAssets[0] || result.screenshotFile || null,
-    writtenAssets: selectedAssets,
-    verification
+    writtenAssets: successfulAssets,
+    verification,
+    succeeded,
+    failed,
+    items: itemResults
   };
+  } finally {
+    const cleanupPaths = [...new Set(selectedAssets.flatMap((asset) => asset.cleanupPaths || []))];
+    if (cleanupPaths.length) await bearDependencies.cleanup(cleanupPaths);
+  }
 }
 
 function buildBearDraft(payload, metadata, screenshot) {
@@ -97,12 +155,18 @@ function buildBearDraft(payload, metadata, screenshot) {
 
 function buildBearDraftParts(payload, metadata, visualAsset) {
   const title = buildTitle(payload, metadata);
-  const summary = (metadata.summary || "待补充摘要。").replace(/\n/g, " ");
+  const summary = escapeBearText(metadata.summary || "待补充摘要。");
   const beforeImage = `* **${title}**`;
+  const article = payload.pageContent?.articleHtml
+    ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
+    : String(payload.pageContent?.markdown || "").trim();
+  const description = escapeBearText(payload.pageMeta?.description || payload.description || "");
   const afterImage = [
+    article ? indentDraftBlock(article) : "",
+    description ? `  * ${description}` : "",
     `  * ${summary}`,
     `  * ${payload.url}`
-  ].join("\n");
+  ].filter(Boolean).join("\n");
   const assets = Array.isArray(visualAsset) ? visualAsset : [visualAsset].filter(Boolean);
 
   if (!assets.length) {
@@ -118,16 +182,27 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
     afterImage,
     full: [
       beforeImage,
-      ...assets.map((asset) => `  * [${asset.label || "媒体"}将由 Bear 附件写入：${asset.filename}]`),
+      ...assets.map((asset) => `  * [${escapeBearText(asset.label || "媒体")}将由 Bear 附件写入：${escapeBearText(asset.filename)}]`),
       afterImage
     ].join("\n")
   };
 }
 
+function indentDraftBlock(markdown) {
+  return String(markdown).split(/\r?\n/).map((line) => line ? `  ${line}` : "  ").join("\n");
+}
+
 function buildTitle(payload, metadata) {
   const title = metadata.titleZh || payload.title?.trim() || hostnameFromUrl(payload.url);
   const oneLine = metadata.oneLine || "阅读笔记摘录";
-  return `${title} — ${oneLine}`.replace(/\s+/g, " ").trim();
+  return escapeBearText(`${title} — ${oneLine}`);
+}
+
+function escapeBearText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/([\\`*_[\]{}()<>#+\-.!|>])/g, "\\$1");
 }
 
 function buildBearPreviewFields(payload, metadata, candidates) {
@@ -172,7 +247,9 @@ async function buildBearCandidates(payload, metadata) {
 
   if (payload.screenshotDataUrl) {
     const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "bear-screenshot", "jpg");
-    const compactScreenshot = screenshot ? await compactImageForBear(screenshot).catch(() => null) : null;
+    const compactScreenshot = screenshot
+      ? await compactImageForBear({ ...screenshot, cleanupPaths: [screenshot.filePath] }).catch(() => null)
+      : null;
     if (compactScreenshot) {
       candidates.push(makeCandidate({
         kind: "screenshot",
@@ -277,17 +354,34 @@ function bearCandidateLabel(candidate) {
 async function resolveSelectedBearAssets(task, options = {}) {
   const result = task.results?.bear;
   const candidates = result?.writePlan?.candidates || [];
-  const selectedIds = new Set((Array.isArray(options.candidateIds) ? options.candidateIds : []).filter(Boolean));
-  const selectedCandidates = selectedIds.size
+  const hasExplicitSelection = Object.prototype.hasOwnProperty.call(options, "candidateIds");
+  const candidateIds = Array.isArray(options.candidateIds) ? options.candidateIds : [];
+  const selectedIds = new Set(candidateIds.filter(Boolean));
+  const selectedCandidates = hasExplicitSelection
     ? candidates.filter((candidate) => selectedIds.has(candidate.id))
     : candidates.filter((candidate) => candidate.selected);
-  const selected = selectedCandidates.length ? selectedCandidates : candidates.slice(0, 1);
-  const assets = [];
-  for (const candidate of selected) {
-    const asset = await resolveBearCandidateAsset(candidate, task.payload, result.metadata || {});
-    if (asset) assets.push(asset);
+  const selected = selectedCandidates.length
+    ? selectedCandidates
+    : (hasExplicitSelection ? [] : candidates.slice(0, 1));
+  if (!selected.length && selectedIds.size) {
+    throw new Error("所选 Bear 素材已失效，请重新选择后再试。");
   }
-  return assets;
+  const assets = [];
+  const items = [];
+  for (const candidate of selected) {
+    try {
+      const asset = await bearDependencies.resolveCandidate(candidate, task.payload, result.metadata || {});
+      if (asset) {
+        assets.push(asset);
+        items.push({ id: candidate.id || "", status: "pending", asset });
+      } else {
+        items.push({ id: candidate.id || "", status: "failed", error: "素材无法解析" });
+      }
+    } catch (error) {
+      items.push({ id: candidate.id || "", status: "failed", error: error.message });
+    }
+  }
+  return { assets, items };
 }
 
 async function resolveBearCandidateAsset(candidate, payload, metadata) {
@@ -385,16 +479,25 @@ async function openBearUrl(url, timeout) {
 async function compactImageForBear(asset) {
   if (!asset?.filePath) return null;
   const targetPath = path.join(os.tmpdir(), "chrome-clip-router-assets", `${Date.now()}-bear-shot.jpg`);
-  await execFileAsync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "55", "-Z", "900", asset.filePath, "--out", targetPath], { timeout: 10000 });
-  const stat = await fs.stat(targetPath);
-  if (stat.size > 280000) return null;
-  return {
-    ...asset,
-    filePath: targetPath,
-    filename: `clip-router-shot-${Date.now()}.jpg`,
-    mimeType: "image/jpeg",
-    size: stat.size
-  };
+  try {
+    await execFileAsync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "55", "-Z", "900", asset.filePath, "--out", targetPath], { timeout: 10000 });
+    const stat = await fs.stat(targetPath);
+    if (stat.size > 280000) {
+      await cleanupOwnedPaths([targetPath]);
+      return null;
+    }
+    return {
+      ...asset,
+      filePath: targetPath,
+      filename: `clip-router-shot-${Date.now()}.jpg`,
+      mimeType: "image/jpeg",
+      size: stat.size,
+      cleanupPaths: [...(asset.cleanupPaths || []), targetPath]
+    };
+  } catch (error) {
+    await cleanupOwnedPaths([targetPath]);
+    throw error;
+  }
 }
 
 async function downloadRemoteAssetForBear(assetUrl, metadata, sourceType = "asset") {
@@ -420,13 +523,16 @@ async function downloadRemoteAssetForBear(assetUrl, metadata, sourceType = "asse
     filePath: rawPath,
     filename: path.basename(rawPath),
     mimeType: contentType,
-    size: buffer.length
+    size: buffer.length,
+    cleanupPaths: [rawPath]
   }).catch(() => null);
-  return compact || {
+  if (compact) return { ...compact, cleanupPaths: [rawPath, compact.filePath] };
+  return {
     filePath: rawPath,
     filename: path.basename(rawPath),
     mimeType: contentType,
-    size: buffer.length
+    size: buffer.length,
+    cleanupPaths: [rawPath]
   };
 }
 
@@ -453,13 +559,19 @@ function extensionFromUrl(assetUrl) {
 
 async function buildTwitterGifForBear(payload, metadata) {
   const media = await downloadTwitterVideo(payload.url, metadata);
-  const gif = await convertVideoToGif(media.filePath, metadata);
-  return {
-    ...gif,
-    kind: "gif",
-    label: "GIF",
-    sourceVideo: media.filePath
-  };
+  try {
+    const gif = await convertVideoToGif(media.filePath, metadata);
+    return {
+      ...gif,
+      kind: "gif",
+      label: "GIF",
+      sourceVideo: media.filePath,
+      cleanupPaths: [...(gif.cleanupPaths || []), media.filePath]
+    };
+  } catch (error) {
+    await cleanupOwnedPaths([media.filePath]);
+    throw error;
+  }
 }
 
 async function buildTwitterPreviewThumbnailForBear(payload, metadata) {
@@ -675,32 +787,42 @@ async function convertVideoToGif(videoPath, metadata) {
   const palettePath = path.join(dir, `${Date.now()}-${base}-palette.png`);
   const gifPath = path.join(dir, `${Date.now()}-${base}.gif`);
   const filters = "fps=10,scale=480:-1:flags=lanczos";
-  await execFileAsync("ffmpeg", [
+  try {
+    await execFileAsync("ffmpeg", [
     "-y",
     "-t", "8",
     "-i", videoPath,
     "-vf", `${filters},palettegen=max_colors=96`,
     palettePath
-  ], { timeout: 30000, maxBuffer: 1024 * 1024 * 2 });
-  await execFileAsync("ffmpeg", [
+    ], { timeout: 30000, maxBuffer: 1024 * 1024 * 2 });
+    await execFileAsync("ffmpeg", [
     "-y",
     "-t", "8",
     "-i", videoPath,
     "-i", palettePath,
     "-lavfi", `${filters} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5`,
     gifPath
-  ], { timeout: 45000, maxBuffer: 1024 * 1024 * 2 });
+    ], { timeout: 45000, maxBuffer: 1024 * 1024 * 2 });
 
-  const stat = await fs.stat(gifPath);
-  if (stat.size > 6 * 1024 * 1024) {
-    throw new Error("GIF 转换后超过 Bear 写入限制");
+    const stat = await fs.stat(gifPath);
+    if (stat.size > 6 * 1024 * 1024) {
+      throw new Error("GIF 转换后超过 Bear 写入限制");
+    }
+    return {
+      filePath: gifPath,
+      filename: `clip-router-x-video-${Date.now()}.gif`,
+      mimeType: "image/gif",
+      size: stat.size,
+      cleanupPaths: [palettePath, gifPath]
+    };
+  } catch (error) {
+    await cleanupOwnedPaths([palettePath, gifPath]);
+    throw error;
   }
-  return {
-    filePath: gifPath,
-    filename: `clip-router-x-video-${Date.now()}.gif`,
-    mimeType: "image/gif",
-    size: stat.size
-  };
+}
+
+async function cleanupOwnedPaths(paths) {
+  await Promise.all([...new Set(paths)].map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
 }
 
 function isTwitterUrl(url) {
@@ -843,11 +965,18 @@ async function findSqliteFiles(root, depth) {
   return results;
 }
 
-function withTimeout(promise, ms, message) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
-  ]);
+async function withTimeout(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function escapeSqlLike(value) {

@@ -62,11 +62,35 @@ preview. Previews are field-aligned per app: Eagle shows title, description,
 link, tags, and a real Eagle folder dropdown; Bear shows title, screenshot,
 description, and link; Obsidian writes Markdown into `mynote/Clippings` with
 typed properties plus the clipped body.
-Eagle supports
-screenshot, top image, URL, and HTML snapshot modes. Bear compresses screenshots
-before writing and opens long x-callback URLs through AppleScript to avoid macOS
-argument length limits. Obsidian creates the Clippings folder if needed and
-writes the visible translated page text and image Markdown when the page DOM contains it.
+Eagle supports screenshot, top image, URL, and HTML snapshot modes. Eagle and
+Bear previews expose discovered media in a three-column grid with select-all,
+clear, and per-item multi-selection; confirmation processes the selected items
+in their displayed order. A failed item does not discard successful siblings,
+and the result reports `partial_success` with per-item details when applicable.
+
+Instagram collection attempts to traverse back to the first slide and then
+forward through the carousel, preserving all discovered media in order. It
+stops in each traversal direction after at most 30 transitions, a repeated
+state, or a transition that makes no progress; restoring the original slide is
+separately bounded. Collection can therefore be incomplete if Instagram's DOM
+or lazy loading does not expose a slide. Images and videos are shown as separate
+selectable items. For an Instagram video, Eagle first tries
+the collected media URL. If that fails, its `yt-dlp` fallback is fail-closed: it
+must find the same 1-based carousel position and match the captured identity
+(required when the carousel has multiple videos), duration (within 1 second),
+and dimensions (within 4 pixels), and the download must produce exactly one
+file. Otherwise that item fails instead of silently substituting another slide.
+
+Bear compresses screenshots before writing and opens long x-callback URLs
+through AppleScript to avoid macOS argument length limits. Obsidian creates a
+standalone article note with typed frontmatter, the extracted article body,
+optional `## 摘录` and `## 备注` sections, and localized article images. Images
+are stored beside the note under `assets/<note-name>/` and Markdown is rewritten
+to relative paths. An individual image download failure leaves its remote URL
+in place and does not prevent the note from being saved.
+
+Canonical source URLs remove common tracking parameters (`utm_*`, `ref`,
+`fbclid`, and `gclid`) before metadata and duplicate handling.
 
 Tasks are appended as JSONL records under:
 

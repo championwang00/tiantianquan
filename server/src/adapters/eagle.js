@@ -193,16 +193,17 @@ export async function confirmEagleWrite(task, options = {}) {
   }
 
   const beforeIds = await listItemIds();
-  const writtenItems = [];
   let activeBeforeIds = beforeIds;
   const primaryFolder = folders[0];
-
-  for (const candidate of candidates) {
+  const usedCandidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const batch = await executeCandidateBatch(candidates, async (candidate) => {
     const imported = await importWithFallback(candidate, {
       payload: task.payload,
       writePlan: result.writePlan,
+      excludedCandidateIds: usedCandidateIds,
       importCandidate: (nextCandidate) => importToEagle(nextCandidate, task.payload, metadata, folders, annotation)
     });
+    usedCandidateIds.add(imported.candidate.id);
     const response = imported.response;
     const importedCandidate = imported.candidate;
     const item = await resolveImportedItem(response, activeBeforeIds, task.payload, importedCandidate, metadata, folders);
@@ -222,8 +223,9 @@ export async function confirmEagleWrite(task, options = {}) {
     }
 
     const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, folders, annotation);
-    writtenItems.push({
+    const writtenItem = {
       candidateId: importedCandidate.id,
+      requestedCandidateId: candidate.id,
       itemId,
       folderId: primaryFolder?.id || "",
       folderName: primaryFolder?.name || "",
@@ -232,16 +234,22 @@ export async function confirmEagleWrite(task, options = {}) {
       importPlan: summarizeImportPlan(importedCandidate),
       verification,
       metadataUpdate,
-      fallbackReason: imported.fallbackReason || ""
-    });
+      fallbackReason: imported.fallbackReason || "",
+      __cleanupCandidate: importedCandidate
+    };
     activeBeforeIds = new Set([...activeBeforeIds, itemId]);
-  }
+    return writtenItem;
+  }, result.writePlan.candidates || candidates);
+  const writtenItems = batch.items.filter((item) => item.status === "success");
 
-  await revealEagle();
+  if (writtenItems.length) await revealEagle();
   return {
     ...result,
-    status: "success",
-    reason: "Eagle 写入并验证成功",
+    status: batch.failed ? (batch.succeeded ? "partial_success" : "failed") : "success",
+    reason: batch.failed ? `Eagle 写入完成：${batch.succeeded} 个成功，${batch.failed} 个失败` : "Eagle 写入并验证成功",
+    succeeded: batch.succeeded,
+    failed: batch.failed,
+    items: batch.items,
     itemIds: writtenItems.map((item) => item.itemId),
     folderIds: folders.map((folder) => folder.id),
     folders: folders.map((folder) => folder.name),
@@ -257,10 +265,52 @@ export async function confirmEagleWrite(task, options = {}) {
 
 export const __testHooks = {
   buildImportCandidates,
+  instagramEntryMatchesCandidate,
   importWithFallback,
+  executeCandidateBatch,
+  normalizeSelectedCandidates,
   selectDefaultCandidates,
   summarizeCandidates
 };
+
+async function executeCandidateBatch(candidates, processCandidate, assetsToCleanup = candidates) {
+  const items = [];
+  const cleanupCandidates = new Set(assetsToCleanup);
+  try {
+    for (const candidate of candidates) {
+      try {
+        const processed = await processCandidate(candidate);
+        const cleanupCandidate = processed?.__cleanupCandidate;
+        if (cleanupCandidate) cleanupCandidates.add(cleanupCandidate);
+        if (processed) delete processed.__cleanupCandidate;
+        items.push({ ...processed, candidateId: candidate.id, status: "success", reason: "" });
+      } catch (error) {
+        items.push({ candidateId: candidate.id, status: "failed", reason: error?.message || String(error) });
+      }
+    }
+  } finally {
+    await cleanupOwnedCandidateAssets([...cleanupCandidates]);
+  }
+  return {
+    succeeded: items.filter((item) => item.status === "success").length,
+    failed: items.filter((item) => item.status === "failed").length,
+    items
+  };
+}
+
+async function cleanupOwnedCandidateAssets(candidateOrCandidates) {
+  const tempRoot = path.resolve(os.tmpdir());
+  const assetRoot = path.join(tempRoot, "chrome-clip-router-assets");
+  const candidates = Array.isArray(candidateOrCandidates) ? candidateOrCandidates : [candidateOrCandidates];
+  const paths = [...new Set(candidates.flatMap((candidate) => [candidate?.asset?.filePath, candidate?.thumbnail?.filePath]).filter(Boolean))];
+  await Promise.all(paths.map(async (filePath) => {
+    const resolved = path.resolve(filePath);
+    const owned = resolved.startsWith(`${assetRoot}${path.sep}`)
+      || (resolved.startsWith(`${tempRoot}${path.sep}`) && path.basename(resolved).startsWith("clip-router-"));
+    if (!owned) return;
+    await fs.unlink(resolved).catch(() => {});
+  }));
+}
 
 async function checkEagleReadiness(url) {
   try {
@@ -275,7 +325,7 @@ async function buildImportPlan(payload, metadata) {
   const sourceType = detectSourceType(payload.url);
   const captureMode = payload.options?.eagle?.captureMode || "screenshot";
   if (captureMode === "url") return { kind: "url", sourceType };
-  if (captureMode === "top-image") {
+  if (captureMode === "top-image" && !(sourceType === "instagram" && payload.pageAssets?.carousel?.length)) {
     const assetUrl = payload.pageMeta?.image || payload.pageAssets?.images?.[0]?.src || "";
     if (assetUrl) return { kind: "asset-url", sourceType, assetUrl };
   }
@@ -328,6 +378,8 @@ async function buildImportCandidates(payload, metadata) {
     candidates.push(...videoCandidates);
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
     candidates.push(...imageCandidates);
+  } else if (sourceType === "instagram") {
+    candidates.push(...buildInstagramCarouselCandidates(payload));
   } else {
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
     candidates.push(...imageCandidates.slice(0, 6));
@@ -387,7 +439,7 @@ async function importWithFallback(candidate, context) {
       fallbackReason: ""
     };
   } catch (error) {
-    const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload);
+    const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload, context.excludedCandidateIds);
     if (!fallback) throw error;
     return {
       response: await context.importCandidate(fallback),
@@ -397,14 +449,15 @@ async function importWithFallback(candidate, context) {
   }
 }
 
-function selectFallbackCandidate(candidate, writePlan, payload) {
+function selectFallbackCandidate(candidate, writePlan, payload, excludedCandidateIds = new Set()) {
   if (!["twitter-url", "media-url"].includes(candidate?.kind)) return null;
   const captureMode = payload?.options?.eagle?.captureMode || "screenshot";
   const candidates = Array.isArray(writePlan?.candidates) ? writePlan.candidates : [];
+  const available = (nextCandidate) => nextCandidate.id !== candidate.id && !excludedCandidateIds.has(nextCandidate.id);
   const preferred = selectDefaultCandidates(candidates, captureMode)
-    .find((nextCandidate) => nextCandidate.selected && nextCandidate.id !== candidate.id);
+    .find((nextCandidate) => nextCandidate.selected && available(nextCandidate));
   return preferred || candidates.find((nextCandidate) => {
-    if (nextCandidate.id === candidate.id) return false;
+    if (!available(nextCandidate)) return false;
     return ["screenshot", "html-snapshot", "asset-url", "url"].includes(nextCandidate.kind);
   }) || null;
 }
@@ -443,8 +496,41 @@ function detectSourceType(url) {
     return "twitter";
   }
   if (host === "xiaohongshu.com" || host.endsWith(".xiaohongshu.com")) return "xiaohongshu";
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) return "instagram";
   if (host.includes("dribbble") || host.includes("behance")) return "portfolio";
   return "webpage";
+}
+
+function buildInstagramCarouselCandidates(payload) {
+  const seen = new Set();
+  const carouselVideoCount = (payload.pageAssets?.carousel || []).filter((asset) => asset.type === "video").length;
+  const shortcode = (() => {
+    try { return new URL(payload.url).pathname.match(/^\/p\/([^/]+)/)?.[1] || "post"; } catch (_error) { return "post"; }
+  })();
+  return (payload.pageAssets?.carousel || []).map((asset) => {
+    const index = Number(asset.index);
+    const type = asset.type === "video" ? "video" : "image";
+    const url = type === "video" ? normalizeContentVideoUrl(asset.src || "") : normalizeContentImageUrl(asset.src || "", "instagram");
+    const key = `${type}:${url || index}`;
+    if ((type === "image" && !url) || seen.has(key) || !Number.isInteger(index) || index < 0) return null;
+    seen.add(key);
+    return makeCandidate({
+      kind: type === "video" ? "media-url" : "asset-url",
+      sourceType: "instagram",
+      ...(type === "video" ? { mediaUrl: url } : { assetUrl: url }),
+      poster: asset.poster || "",
+      selected: true,
+      label: `Instagram ${type === "video" ? "视频" : "图片"} ${index + 1}`,
+      id: `instagram:${shortcode}:${index}:${type}`,
+      carouselIndex: index,
+      postUrl: payload.url,
+      duration: Number(asset.duration || 0),
+      mediaId: asset.mediaId || "",
+      carouselVideoCount,
+      width: Number(asset.width || 0),
+      height: Number(asset.height || 0)
+    });
+  }).filter(Boolean).sort((a, b) => a.carouselIndex - b.carouselIndex);
 }
 
 function buildContentImageCandidates(payload, sourceType, options = {}) {
@@ -784,7 +870,10 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
   }
   if (importPlan.kind === "media-url") {
-    const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType);
+    const asset = await downloadMediaUrl(importPlan.mediaUrl, metadata, importPlan.sourceType).catch((error) => {
+      if (importPlan.sourceType !== "instagram" || !importPlan.postUrl || !Number.isInteger(importPlan.carouselIndex)) throw error;
+      return downloadInstagramCarouselVideo(importPlan.postUrl, importPlan, metadata);
+    });
     importPlan.asset = asset;
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
   }
@@ -800,6 +889,38 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
     return importPathToEagle(importPlan.asset.filePath, payload, metadata, folders, annotation);
   }
   return importUrlToEagle(payload, metadata, folders, annotation);
+}
+
+async function downloadInstagramCarouselVideo(postUrl, candidate, metadata) {
+  const carouselIndex = candidate.carouselIndex;
+  const { stdout: jsonText } = await execFileAsync("yt-dlp", ["--skip-download", "--dump-single-json", postUrl], { timeout: 30000, maxBuffer: 1024 * 1024 * 8 });
+  const info = JSON.parse(jsonText);
+  const entries = Array.isArray(info.entries) ? info.entries : [info];
+  const entry = entries.find((item) => Number(item?.playlist_index) === carouselIndex + 1);
+  if (!entry || !instagramEntryMatchesCandidate(entry, candidate)) {
+    throw new Error(`Instagram 第 ${carouselIndex + 1} 项无法与采集视频精确匹配`);
+  }
+  const outputTemplate = path.join(os.tmpdir(), `clip-router-instagram-${carouselIndex}-${Date.now()}-${safeShellName(metadata.titleZh || "video")}.%(ext)s`);
+  const { stdout } = await execFileAsync("yt-dlp", [
+    "--playlist-items", String(carouselIndex + 1),
+    "--merge-output-format", "mp4",
+    "-f", "bv*+ba/b",
+    "-o", outputTemplate,
+    "--print", "after_move:filepath",
+    postUrl
+  ], { timeout: 120000, maxBuffer: 1024 * 1024 * 2 });
+  const paths = stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (paths.length !== 1) throw new Error(`Instagram 第 ${carouselIndex + 1} 项视频兜底未返回唯一文件`);
+  return { filePath: paths[0], filename: path.basename(paths[0]), source: "yt-dlp-instagram-carousel", size: await fileSize(paths[0]) };
+}
+
+function instagramEntryMatchesCandidate(entry, candidate) {
+  if (!entry || !candidate || Number(entry.playlist_index) !== Number(candidate.carouselIndex) + 1) return false;
+  const close = (actual, expected, tolerance) => !expected || (actual && Math.abs(Number(actual) - Number(expected)) <= tolerance);
+  if (candidate.carouselVideoCount > 1 && (!candidate.mediaId || !entry.id || String(candidate.mediaId) !== String(entry.id))) return false;
+  return close(entry.duration, candidate.duration, 1)
+    && close(entry.width, candidate.width, 4)
+    && close(entry.height, candidate.height, 4);
 }
 
 async function downloadRemoteAsset(assetUrl, metadata, sourceType = "asset") {
@@ -937,6 +1058,10 @@ function summarizeImportPlan(importPlan) {
     thumbnailFilename: importPlan.thumbnail?.filename || importPlan.thumbnailFilename || "",
     width: importPlan.width || 0,
     height: importPlan.height || 0,
+    duration: importPlan.duration || 0,
+    carouselIndex: importPlan.carouselIndex,
+    postUrl: importPlan.postUrl || "",
+    mediaId: importPlan.mediaId || "",
     reason: importPlan.reason || ""
   };
 }
@@ -994,13 +1119,14 @@ function normalizeSelectedCandidates(writePlan, candidateIds = [], captureMode =
   const candidates = Array.isArray(writePlan.candidates) && writePlan.candidates.length
     ? writePlan.candidates
     : [writePlan.importPlan].filter(Boolean);
-  const selectedIds = new Set((Array.isArray(candidateIds) ? candidateIds : []).filter(Boolean));
+  const selectedIds = new Set((Array.isArray(candidateIds) ? candidateIds : [candidateIds]).filter(Boolean));
   if (!selectedIds.size && captureMode) {
     return selectDefaultCandidates(candidates, captureMode).filter((candidate) => candidate.selected);
   }
   const selected = selectedIds.size
     ? candidates.filter((candidate) => selectedIds.has(candidate.id))
     : candidates.filter((candidate) => candidate.selected);
+  if (selectedIds.size) return selected;
   return selected.length ? selected : candidates.slice(0, 1);
 }
 

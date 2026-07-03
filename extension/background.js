@@ -1,4 +1,4 @@
-importScripts("config.js", "routerClient.js");
+importScripts("config.js", "routerClient.js", "instagramCarousel.js");
 
 const SESSION_TASKS_KEY = "clipRouterActiveTasks";
 
@@ -142,25 +142,33 @@ async function collectPageContextInBackground(tab, options = {}) {
   if (!tab?.id) return emptyPageContext();
 
   try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["instagramCarousel.js"]
+    });
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       args: [{ fullContent: options.fullContent !== false, deepAssets: options.deepAssets === true }],
-      func: ({ fullContent, deepAssets }) => {
+      func: async ({ fullContent, deepAssets }) => {
+        const traverseCarousel = globalThis.traverseInstagramCarousel;
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
         const article = findReadableRoot(mainTweetRoot);
+        const structuredArticle = mainTweetRoot || findArticleRoot();
         const visibleText = getVisibleText(article);
         const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 20 : 6);
         const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 10) : [];
         const videoRects = deepAssets ? collectVideoRects(mainTweetRoot).slice(0, 5) : [];
+        const carousel = deepAssets ? await collectInstagramCarousel() : [];
         const content = fullContent
           ? {
               text: (visibleText || getVisibleText(document.body)).slice(0, 60000),
               markdown: nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000),
+              articleHtml: structuredArticle?.outerHTML?.slice(0, 240000) || "",
               htmlSnapshot: `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000)
             }
-          : { text: "", markdown: "", htmlSnapshot: "" };
+          : { text: "", markdown: "", articleHtml: "", htmlSnapshot: "" };
         return {
           meta: {
             description: metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
@@ -174,6 +182,7 @@ async function collectPageContextInBackground(tab, options = {}) {
             images,
             videos,
             videoRects,
+            carousel,
             viewport: {
               width: window.innerWidth || document.documentElement.clientWidth || 0,
               height: window.innerHeight || document.documentElement.clientHeight || 0,
@@ -193,6 +202,30 @@ async function collectPageContextInBackground(tab, options = {}) {
           return candidates
             .map((node) => ({ node, score: readableScore(node) }))
             .sort((a, b) => b.score - a.score)[0]?.node || document.body;
+        }
+
+        function findArticleRoot() {
+          const preferred = document.querySelector("article")
+            || document.querySelector("[role='main'] article")
+            || document.querySelector("main");
+          if (preferred) return preferred;
+          let bestNode = null;
+          let bestScore = -1;
+          const candidates = document.querySelectorAll("section, div");
+          const limit = Math.min(candidates.length, 500);
+          for (let index = 0; index < limit; index += 1) {
+            const node = candidates[index];
+            const textLength = (node.innerText || "").trim().length;
+            if (textLength < 200) continue;
+            const score = textLength
+              + node.querySelectorAll("p, li, blockquote, pre, h1, h2, h3").length * 180
+              + node.querySelectorAll("img").length * 80;
+            if (score > bestScore) {
+              bestNode = node;
+              bestScore = score;
+            }
+          }
+          return bestNode || document.body;
         }
 
         function findSocialContentRoot(scopeRoot = document) {
@@ -238,6 +271,59 @@ async function collectPageContextInBackground(tab, options = {}) {
             }));
           if (byStatusLink) return byStatusLink;
           return articles.find((article) => article.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], video, img[src*="pbs.twimg.com/media"]')) || null;
+        }
+
+        async function collectInstagramCarousel() {
+          if (!/^\/p\//.test(location.pathname) || !/(^|\.)instagram\.com$/.test(location.hostname)) return [];
+          const root = document.querySelector('main article') || document.querySelector('article');
+          if (!root) return [];
+          const activeMedia = () => [...root.querySelectorAll('video, img')].filter((node) => !node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')).map((node) => ({ node, rect: node.getBoundingClientRect() })).filter(({ rect }) => rect.width >= 240 && rect.height >= 240 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth).sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0]?.node || null;
+          if (!activeMedia()) return [];
+          const items = new Map();
+          const read = () => {
+            const active = activeMedia(); if (!active) return;
+            const viewportNode = active.parentElement;
+            const viewport = viewportNode.getBoundingClientRect();
+            const media = [...viewportNode.querySelectorAll('video, img')].filter((node) => {
+              if (node.closest('header, nav, aside, [role="dialog"], [role="complementary"]')) return false;
+              const rect = node.getBoundingClientRect();
+              return rect.width >= 240 && rect.height >= 240 && rect.left >= viewport.left - 2 && rect.right <= viewport.right + 2 && rect.top >= viewport.top - 2 && rect.bottom <= viewport.bottom + 2;
+            });
+            for (const node of media) {
+              const isVideo = node.tagName === 'VIDEO';
+              const src = isVideo
+                ? (node.currentSrc || node.src || [...node.querySelectorAll('source')].map((source) => source.src).find(Boolean) || '')
+                : (pickLargestSrcset(node.getAttribute('srcset') || '') || node.currentSrc || node.src || '');
+              const normalized = absolutize(src);
+              if (!normalized || normalized.startsWith('data:')) continue;
+              const key = `${isVideo ? 'video' : 'image'}:${normalized}`;
+              if (!items.has(key)) items.set(key, {
+                index: items.size,
+                type: isVideo ? 'video' : 'image',
+                src: normalized,
+                poster: isVideo ? absolutize(node.poster || '') : '',
+                mediaId: node.getAttribute('data-media-id') || node.getAttribute('data-id') || node.closest('[data-media-id], [data-id]')?.getAttribute('data-media-id') || node.closest('[data-media-id], [data-id]')?.getAttribute('data-id') || normalized.match(/(?:media|video)[_\/-](\d{5,})/i)?.[1] || (() => { try { return new URL(normalized).searchParams.get('id') || ''; } catch (_error) { return ''; } })(),
+                duration: isVideo && Number.isFinite(node.duration) ? node.duration : 0,
+                width: node.videoWidth || node.naturalWidth || node.clientWidth || 0,
+                height: node.videoHeight || node.naturalHeight || node.clientHeight || 0
+              });
+            }
+          };
+          const signature = () => { const node = activeMedia(); return node?.currentSrc || node?.src || node?.poster || ''; };
+          const control = (direction) => {
+            const active = activeMedia(); if (!active) return null;
+            const viewport = active.parentElement.getBoundingClientRect();
+            const buttons = [...root.querySelectorAll('[role="button"], button')].filter((button) => { const rect = button.getBoundingClientRect(); return rect.width > 0 && rect.right >= viewport.left && rect.left <= viewport.right && rect.bottom >= viewport.top && rect.top <= viewport.bottom; });
+            const words = direction === 'next' ? /next|下一|次へ|다음/i : /previous|prev|上一|前へ|이전/i;
+            const semantic = buttons.find((button) => words.test(`${button.getAttribute('aria-label') || ''} ${button.querySelector('svg title')?.textContent || ''}`));
+            if (semantic) return semantic;
+            return buttons.find((button) => { const svg = button.querySelector('svg'); const rect = button.getBoundingClientRect(); return svg && rect.width <= 64 && rect.height <= 64 && (direction === 'next' ? rect.left > viewport.left + viewport.width * .65 : rect.right < viewport.left + viewport.width * .35); });
+          };
+          const waitForChange = async (before) => {
+            for (let poll = 0; poll < 10; poll += 1) { await new Promise((resolve) => setTimeout(resolve, 60)); if (signature() && signature() !== before) return signature(); }
+            return '';
+          };
+          return traverseCarousel({ read: () => { read(); return [...items.values()]; }, signature, clickPrevious: () => { const button = control('previous'); if (!button) return false; button.click(); return true; }, clickNext: () => { const button = control('next'); if (!button) return false; button.click(); return true; }, waitForChange, maxTransitions: 30 });
         }
 
         function collectImages(deep, scopeRoot = null) {
@@ -479,7 +565,7 @@ async function collectPageContextInBackground(tab, options = {}) {
 }
 
 function emptyPageContext() {
-  return { meta: {}, assets: { images: [], videos: [], videoRects: [] }, content: { text: "", markdown: "", htmlSnapshot: "" } };
+  return { meta: {}, assets: { images: [], videos: [], videoRects: [], carousel: [] }, content: { text: "", markdown: "", htmlSnapshot: "" } };
 }
 
 function isRichMediaUrl(url) {
@@ -490,7 +576,9 @@ function isRichMediaUrl(url) {
       || host.endsWith(".x.com")
       || host.endsWith(".twitter.com")
       || host === "xiaohongshu.com"
-      || host.endsWith(".xiaohongshu.com");
+      || host.endsWith(".xiaohongshu.com")
+      || host === "instagram.com"
+      || host.endsWith(".instagram.com");
   } catch (_error) {
     return false;
   }

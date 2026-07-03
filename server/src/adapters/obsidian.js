@@ -1,9 +1,15 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
+import dns from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
+import { Readable } from "node:stream";
 import { generateClipMetadata } from "../utils/provider.js";
 import { hostnameFromUrl, safeFileName } from "../utils/webpage.js";
 import { getJournalDate } from "../utils/time.js";
+import { articleHtmlToMarkdown, extractArticleImageUrls } from "../utils/article.js";
 
 const DEFAULT_VAULT = path.join(
   os.homedir(),
@@ -46,9 +52,17 @@ export async function confirmObsidianWrite(task) {
     if (!existing.ok) {
       const filePath = await uniqueFilePath(writePlan.filePath);
       writePlan.filePath = filePath;
+      writePlan.markdown = await localizeMarkdownImages({
+        markdown: writePlan.markdown,
+        noteFilePath: filePath
+      });
       await fs.writeFile(filePath, writePlan.markdown, "utf8");
     }
   } else {
+    writePlan.markdown = await localizeMarkdownImages({
+      markdown: writePlan.markdown,
+      noteFilePath: writePlan.filePath
+    });
     await fs.writeFile(writePlan.filePath, writePlan.markdown, "utf8");
   }
 
@@ -99,7 +113,9 @@ async function uniqueFilePath(filePath) {
 function buildStandaloneMarkdown(payload, metadata) {
   const tags = metadata.tags.map((tag) => `  - ${tag}`).join("\n");
   const authors = metadata.author.values.map((author) => `  - ${author}`).join("\n");
-  const originalText = getPreferredOriginalText(payload);
+  const originalText = payload.pageContent?.articleHtml
+    ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
+    : getPreferredOriginalText(payload);
   return [
     "---",
     `title: ${yamlString(metadata.titleZh)}`,
@@ -117,6 +133,175 @@ function buildStandaloneMarkdown(payload, metadata) {
     payload.selectedText && originalText !== payload.selectedText ? ["", "## 摘录", "", payload.selectedText].join("\n") : "",
     payload.userNote ? ["", "## 备注", "", payload.userNote].join("\n") : ""
   ].filter(Boolean).join("\n");
+}
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+export async function localizeMarkdownImages({
+  markdown,
+  noteFilePath,
+  fetchImpl,
+  resolveImpl = defaultResolve,
+  timeoutMs = 10_000
+}) {
+  const source = String(markdown || "");
+  const urls = extractArticleImageUrls(source);
+  if (!urls.length) return source;
+
+  const note = path.parse(noteFilePath);
+  const assetDir = path.join(note.dir, "assets", safeFileName(note.name));
+  const replacements = new Map();
+  const usedNames = new Set();
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("image download timed out")), timeoutMs);
+    try {
+      const { response, finalUrl } = await fetchPublicImage(url, fetchImpl, resolveImpl, controller.signal);
+      if (!response?.ok) throw new Error(`HTTP ${response?.status || "error"}`);
+      const declaredSize = Number(response.headers?.get("content-length") || 0);
+      if (declaredSize > MAX_IMAGE_BYTES) throw new Error("image too large");
+      const extension = imageExtension(response.headers?.get("content-type"));
+      const bytes = await readLimitedBody(response.body, MAX_IMAGE_BYTES, controller.signal);
+      const urlPath = new URL(finalUrl).pathname;
+      let stem = safeFileName(path.basename(urlPath, path.extname(urlPath)) || "image")
+        .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+      if (!stem) stem = "image";
+      let fileName = `${stem}${extension}`;
+      for (let suffix = 2; usedNames.has(fileName); suffix += 1) fileName = `${stem}-${suffix}${extension}`;
+      usedNames.add(fileName);
+      await fs.mkdir(assetDir, { recursive: true });
+      await fs.writeFile(path.join(assetDir, fileName), bytes);
+      replacements.set(url, path.posix.join("assets", safeFileName(note.name), fileName));
+    } catch (_error) {
+      // A failed image must not prevent the note itself from being saved.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return replaceImageDestinations(source, replacements);
+}
+
+function imageExtension(contentType) {
+  const type = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+  const byType = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/avif": ".avif" };
+  if (byType[type]) return byType[type];
+  throw new Error("unsupported image MIME type");
+}
+
+async function defaultResolve(hostname) {
+  return dns.lookup(hostname, { all: true, verbatim: true });
+}
+
+async function assertPublicUrl(value, resolveImpl) {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
+  if (url.username || url.password) throw new Error("credentials are not allowed");
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) throw new Error("non-public image host");
+  const literal = net.isIP(hostname) ? [{ address: hostname }] : await resolveImpl(hostname);
+  if (!literal?.length || literal.some(({ address }) => !isPublicIp(address))) throw new Error("non-public image host");
+  return { url, addresses: literal };
+}
+
+async function fetchPublicImage(initialUrl, fetchImpl, resolveImpl, signal) {
+  let current = initialUrl;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    const validated = await assertPublicUrl(current, resolveImpl);
+    const response = typeof fetchImpl === "function"
+      ? await fetchImpl(current, { redirect: "manual", signal })
+      : await pinnedRequest(validated.url, validated.addresses[0], signal);
+    if (![301, 302, 303, 307, 308].includes(response.status)) return { response, finalUrl: current };
+    const location = response.headers?.get("location");
+    if (!location || redirects === 5) throw new Error("invalid redirect");
+    current = new URL(location, current).href;
+  }
+  throw new Error("too many redirects");
+}
+
+async function pinnedRequest(url, resolved, signal) {
+  const transport = url.protocol === "https:" ? https : http;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  return new Promise((resolve, reject) => {
+    const request = transport.request({
+      protocol: url.protocol,
+      hostname: resolved.address,
+      family: resolved.family || net.isIP(resolved.address),
+      port: url.port || undefined,
+      method: "GET",
+      path: `${url.pathname}${url.search}`,
+      headers: { Host: url.host, Accept: "image/jpeg,image/png,image/gif,image/webp,image/avif" },
+      servername: url.protocol === "https:" ? hostname : undefined
+    }, (incoming) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) value.forEach((item) => headers.append(name, item));
+        else if (value != null) headers.set(name, value);
+      }
+      resolve(new Response(Readable.toWeb(incoming), { status: incoming.statusCode, headers }));
+    });
+    const abort = () => request.destroy(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    request.once("error", reject);
+    request.once("close", () => signal.removeEventListener("abort", abort));
+    request.end();
+  });
+}
+
+async function readLimitedBody(body, maximum, signal) {
+  if (!body?.getReader) throw new Error("missing response body");
+  const reader = body.getReader();
+  const chunks = [];
+  let size = 0;
+  const abort = () => reader.cancel(signal.reason).catch(() => {});
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    while (true) {
+      if (signal.aborted) throw signal.reason;
+      const { done, value } = await reader.read();
+      if (signal.aborted) throw signal.reason;
+      if (done) break;
+      size += value.byteLength;
+      if (size > maximum) {
+        await reader.cancel("image too large");
+        throw new Error("image too large");
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (signal.aborted) throw signal.reason;
+    return Buffer.concat(chunks, size);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+function isPublicIp(address) {
+  const normalized = String(address).toLowerCase().split("%", 1)[0];
+  if (normalized.startsWith("::ffff:")) return isPublicIp(normalized.slice(7));
+  if (net.isIPv4(normalized)) {
+    const [a, b, c] = normalized.split(".").map(Number);
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 0) ||
+      (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
+  }
+  if (!net.isIPv6(normalized)) return false;
+  return !(/^(?:::|::1)$/.test(normalized) || /^(?:fc|fd|fe[89ab]|ff)/.test(normalized) ||
+    /^2001:db8(?::|$)/.test(normalized) || /^2001:(?:0|10)(?::|$)/.test(normalized));
+}
+
+function replaceImageDestinations(markdown, replacements) {
+  return markdown.replace(/(!\[[^\n]*?\]\()(<[^>]+>|(?:\\.|[^)])*(?:\((?:\\.|[^)])*\)(?:\\.|[^)])*)?)(\))/g, (match, prefix, destination, close) => {
+    for (const [url, replacement] of replacements) {
+      if (destination === `<${url}>`) return `${prefix}${replacement}${close}`;
+      if (destination === url) return `${prefix}${replacement}${close}`;
+      if (destination?.startsWith(`${url} `)) return `${prefix}${replacement}${destination.slice(url.length)}${close}`;
+      if (destination?.startsWith(`<${url}> `)) return `${prefix}${replacement}${destination.slice(url.length + 2)}${close}`;
+    }
+    return match;
+  });
 }
 
 function buildObsidianPreviewFields(payload, metadata, writePlan) {
