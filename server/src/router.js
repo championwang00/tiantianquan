@@ -2,6 +2,7 @@ import { confirmTaskBear, confirmTaskEagle, confirmTaskObsidian, createTask, get
 import { listEagleFolders } from "./adapters/eagle.js";
 import { envFilePath } from "./utils/env.js";
 import { testProviderSettings } from "./utils/provider.js";
+import { normalizeSourceUrl } from "./utils/webpage.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -278,7 +279,8 @@ function validatePayload(payload) {
 
   return {
     source: payload.source || "chrome-extension",
-    url: payload.url,
+    captureUrl: payload.url,
+    url: normalizeSourceUrl(payload.url),
     title: payload.title || payload.url,
     selectedText: payload.selectedText || "",
     userNote: payload.userNote || "",

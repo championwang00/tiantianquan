@@ -6,6 +6,21 @@ export function hostnameFromUrl(url) {
   }
 }
 
+export function normalizeSourceUrl(url) {
+  try {
+    const normalized = new URL(url);
+    for (const key of [...normalized.searchParams.keys()]) {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === "ref" || lowerKey.startsWith("utm_") || lowerKey === "fbclid" || lowerKey === "gclid") {
+        normalized.searchParams.delete(key);
+      }
+    }
+    return normalized.toString();
+  } catch (_error) {
+    return url;
+  }
+}
+
 export function safeFileName(input) {
   const cleaned = toWellFormedText(input || "untitled")
     .replace(/[\\/:*?"<>|#%{}[\]^~`]/g, " ")
