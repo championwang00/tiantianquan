@@ -61,6 +61,62 @@ test("continues after one attachment fails and reports per-item outcome", async 
   assert.deepEqual(result.items.map(({ id, status }) => [id, status]), [["good", "success"], ["bad", "failed"]]);
 });
 
+test("keeps an added attachment successful when optional indentation fails", async () => {
+  __setBearTestHooks({
+    resolveCandidate: async (candidate) => ({ filePath: `/tmp/${candidate.id}`, filename: `${candidate.id}.jpg` }),
+    append: async () => {}, addFile: async () => {}, indent: async () => { throw new Error("format failed"); }, wait: async () => {},
+    verify: async (_url, filenames) => ({ count: 1, imageRefCount: filenames.length })
+  });
+
+  const result = await confirmBearWrite(bearTask([candidate("good")]), { candidateIds: ["good"] });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(result.items[0].status, "success");
+  assert.deepEqual(result.items[0].warnings, [{ stage: "indent", error: "format failed" }]);
+});
+
+test("escapes hostile metadata fields while preserving article markdown", () => {
+  const payload = {
+    url: "https://example.com/story",
+    title: "[bad](javascript:alert(1))\n# forged",
+    pageMeta: { description: "desc\n* injected [x](javascript:boom)" },
+    pageContent: { articleHtml: "<article><h2>Safe article</h2><p><strong>kept</strong></p></article>" }
+  };
+  const draft = __testBuildBearDraftParts(payload, { oneLine: "line\nbreak", summary: "sum\n* injected" }, [{
+    label: "[label](javascript:bad)\nnext", filename: "evil]\n* file.jpg"
+  }]).full;
+
+  assert.match(draft, /## Safe article\n\s+\*\*kept\*\*/);
+  assert.doesNotMatch(draft, /\]\(javascript:/);
+  assert.doesNotMatch(draft, /\n# forged|\n\* injected|\nnext/);
+  assert.match(draft, /\\\[bad\\\]/);
+});
+
+test("cleans only explicitly owned materialization artifacts on success", async () => {
+  const removed = [];
+  __setBearTestHooks({
+    resolveCandidate: async () => ({ filePath: "/tmp/derived.jpg", filename: "derived.jpg", cleanupPaths: ["/tmp/raw.jpg", "/tmp/derived.jpg"] }),
+    append: async () => {}, addFile: async () => {}, indent: async () => {}, wait: async () => {}, verify: async () => ({ count: 1, imageRefCount: 1 }),
+    cleanup: async (paths) => removed.push(...paths)
+  });
+
+  await confirmBearWrite(bearTask([candidate("owned")]), { candidateIds: ["owned"] });
+
+  assert.deepEqual(removed, ["/tmp/raw.jpg", "/tmp/derived.jpg"]);
+});
+
+test("cleans owned artifacts after write failure but never an unowned filePath", async () => {
+  const removed = [];
+  __setBearTestHooks({
+    resolveCandidate: async () => ({ filePath: "/Users/me/photo.jpg", filename: "photo.jpg", cleanupPaths: ["/tmp/generated.gif"] }),
+    append: async () => { throw new Error("Bear unavailable"); }, wait: async () => {}, cleanup: async (paths) => removed.push(...paths)
+  });
+
+  await assert.rejects(confirmBearWrite(bearTask([candidate("owned")]), { candidateIds: ["owned"] }), /Bear unavailable/);
+  assert.deepEqual(removed, ["/tmp/generated.gif"]);
+});
+
 function candidate(id) { return { id, kind: "asset-url", assetUrl: `https://example.com/${id}.jpg`, selected: true }; }
 function bearTask(candidates) {
   const payload = { url: "https://example.com/story", title: "Story", pageMeta: {}, pageContent: {} };

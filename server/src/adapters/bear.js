@@ -23,6 +23,7 @@ const defaultBearDependencies = {
   addFile: addFileToBear,
   indent: indentBearImageLine,
   verify: verifyBearUrl,
+  cleanup: cleanupOwnedPaths,
   wait
 };
 let bearDependencies = { ...defaultBearDependencies };
@@ -75,6 +76,7 @@ async function confirmBearWriteInner(task, options) {
   const includeScreenshot = options.includeScreenshot !== false;
   const resolution = includeScreenshot ? await resolveSelectedBearAssets(task, options) : { assets: [], items: [] };
   const selectedAssets = resolution.assets;
+  try {
   const draft = includeScreenshot
     ? buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets).full
     : (result.draftNoScreenshot || buildBearDraftParts(task.payload, result.metadata || {}, null).full);
@@ -85,9 +87,13 @@ async function confirmBearWriteInner(task, options) {
       const item = resolution.items.find((entry) => entry.asset === asset);
       try {
         await bearDependencies.addFile(asset.filePath, asset.filename);
-        await bearDependencies.wait(900);
-        await bearDependencies.indent(asset.filename);
         if (item) item.status = "success";
+        await bearDependencies.wait(900);
+        try {
+          await bearDependencies.indent(asset.filename);
+        } catch (error) {
+          if (item) item.warnings = [...(item.warnings || []), { stage: "indent", error: error.message }];
+        }
       } catch (error) {
         if (item) {
           item.status = "failed";
@@ -130,6 +136,10 @@ async function confirmBearWriteInner(task, options) {
     failed,
     items: itemResults
   };
+  } finally {
+    const cleanupPaths = [...new Set(selectedAssets.flatMap((asset) => asset.cleanupPaths || []))];
+    if (cleanupPaths.length) await bearDependencies.cleanup(cleanupPaths);
+  }
 }
 
 function buildBearDraft(payload, metadata, screenshot) {
@@ -138,15 +148,15 @@ function buildBearDraft(payload, metadata, screenshot) {
 
 function buildBearDraftParts(payload, metadata, visualAsset) {
   const title = buildTitle(payload, metadata);
-  const summary = (metadata.summary || "待补充摘要。").replace(/\n/g, " ");
+  const summary = escapeBearText(metadata.summary || "待补充摘要。");
   const beforeImage = `* **${title}**`;
   const article = payload.pageContent?.articleHtml
     ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
     : String(payload.pageContent?.markdown || "").trim();
-  const description = String(payload.pageMeta?.description || payload.description || "").trim();
+  const description = escapeBearText(payload.pageMeta?.description || payload.description || "");
   const afterImage = [
     article ? indentDraftBlock(article) : "",
-    description ? `  * ${description.replace(/\n/g, " ")}` : "",
+    description ? `  * ${description}` : "",
     `  * ${summary}`,
     `  * ${payload.url}`
   ].filter(Boolean).join("\n");
@@ -165,7 +175,7 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
     afterImage,
     full: [
       beforeImage,
-      ...assets.map((asset) => `  * [${asset.label || "媒体"}将由 Bear 附件写入：${asset.filename}]`),
+      ...assets.map((asset) => `  * [${escapeBearText(asset.label || "媒体")}将由 Bear 附件写入：${escapeBearText(asset.filename)}]`),
       afterImage
     ].join("\n")
   };
@@ -178,7 +188,14 @@ function indentDraftBlock(markdown) {
 function buildTitle(payload, metadata) {
   const title = metadata.titleZh || payload.title?.trim() || hostnameFromUrl(payload.url);
   const oneLine = metadata.oneLine || "阅读笔记摘录";
-  return `${title} — ${oneLine}`.replace(/\s+/g, " ").trim();
+  return escapeBearText(`${title} — ${oneLine}`);
+}
+
+function escapeBearText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/([\\`*_[\]{}()<>#+\-.!|>])/g, "\\$1");
 }
 
 function buildBearPreviewFields(payload, metadata, candidates) {
@@ -223,7 +240,9 @@ async function buildBearCandidates(payload, metadata) {
 
   if (payload.screenshotDataUrl) {
     const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "bear-screenshot", "jpg");
-    const compactScreenshot = screenshot ? await compactImageForBear(screenshot).catch(() => null) : null;
+    const compactScreenshot = screenshot
+      ? await compactImageForBear({ ...screenshot, cleanupPaths: [screenshot.filePath] }).catch(() => null)
+      : null;
     if (compactScreenshot) {
       candidates.push(makeCandidate({
         kind: "screenshot",
@@ -446,16 +465,25 @@ async function openBearUrl(url, timeout) {
 async function compactImageForBear(asset) {
   if (!asset?.filePath) return null;
   const targetPath = path.join(os.tmpdir(), "chrome-clip-router-assets", `${Date.now()}-bear-shot.jpg`);
-  await execFileAsync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "55", "-Z", "900", asset.filePath, "--out", targetPath], { timeout: 10000 });
-  const stat = await fs.stat(targetPath);
-  if (stat.size > 280000) return null;
-  return {
-    ...asset,
-    filePath: targetPath,
-    filename: `clip-router-shot-${Date.now()}.jpg`,
-    mimeType: "image/jpeg",
-    size: stat.size
-  };
+  try {
+    await execFileAsync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "55", "-Z", "900", asset.filePath, "--out", targetPath], { timeout: 10000 });
+    const stat = await fs.stat(targetPath);
+    if (stat.size > 280000) {
+      await cleanupOwnedPaths([targetPath]);
+      return null;
+    }
+    return {
+      ...asset,
+      filePath: targetPath,
+      filename: `clip-router-shot-${Date.now()}.jpg`,
+      mimeType: "image/jpeg",
+      size: stat.size,
+      cleanupPaths: [...(asset.cleanupPaths || []), targetPath]
+    };
+  } catch (error) {
+    await cleanupOwnedPaths([targetPath]);
+    throw error;
+  }
 }
 
 async function downloadRemoteAssetForBear(assetUrl, metadata, sourceType = "asset") {
@@ -481,13 +509,16 @@ async function downloadRemoteAssetForBear(assetUrl, metadata, sourceType = "asse
     filePath: rawPath,
     filename: path.basename(rawPath),
     mimeType: contentType,
-    size: buffer.length
+    size: buffer.length,
+    cleanupPaths: [rawPath]
   }).catch(() => null);
-  return compact || {
+  if (compact) return { ...compact, cleanupPaths: [rawPath, compact.filePath] };
+  return {
     filePath: rawPath,
     filename: path.basename(rawPath),
     mimeType: contentType,
-    size: buffer.length
+    size: buffer.length,
+    cleanupPaths: [rawPath]
   };
 }
 
@@ -514,13 +545,19 @@ function extensionFromUrl(assetUrl) {
 
 async function buildTwitterGifForBear(payload, metadata) {
   const media = await downloadTwitterVideo(payload.url, metadata);
-  const gif = await convertVideoToGif(media.filePath, metadata);
-  return {
-    ...gif,
-    kind: "gif",
-    label: "GIF",
-    sourceVideo: media.filePath
-  };
+  try {
+    const gif = await convertVideoToGif(media.filePath, metadata);
+    return {
+      ...gif,
+      kind: "gif",
+      label: "GIF",
+      sourceVideo: media.filePath,
+      cleanupPaths: [...(gif.cleanupPaths || []), media.filePath]
+    };
+  } catch (error) {
+    await cleanupOwnedPaths([media.filePath]);
+    throw error;
+  }
 }
 
 async function buildTwitterPreviewThumbnailForBear(payload, metadata) {
@@ -736,32 +773,42 @@ async function convertVideoToGif(videoPath, metadata) {
   const palettePath = path.join(dir, `${Date.now()}-${base}-palette.png`);
   const gifPath = path.join(dir, `${Date.now()}-${base}.gif`);
   const filters = "fps=10,scale=480:-1:flags=lanczos";
-  await execFileAsync("ffmpeg", [
+  try {
+    await execFileAsync("ffmpeg", [
     "-y",
     "-t", "8",
     "-i", videoPath,
     "-vf", `${filters},palettegen=max_colors=96`,
     palettePath
-  ], { timeout: 30000, maxBuffer: 1024 * 1024 * 2 });
-  await execFileAsync("ffmpeg", [
+    ], { timeout: 30000, maxBuffer: 1024 * 1024 * 2 });
+    await execFileAsync("ffmpeg", [
     "-y",
     "-t", "8",
     "-i", videoPath,
     "-i", palettePath,
     "-lavfi", `${filters} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5`,
     gifPath
-  ], { timeout: 45000, maxBuffer: 1024 * 1024 * 2 });
+    ], { timeout: 45000, maxBuffer: 1024 * 1024 * 2 });
 
-  const stat = await fs.stat(gifPath);
-  if (stat.size > 6 * 1024 * 1024) {
-    throw new Error("GIF 转换后超过 Bear 写入限制");
+    const stat = await fs.stat(gifPath);
+    if (stat.size > 6 * 1024 * 1024) {
+      throw new Error("GIF 转换后超过 Bear 写入限制");
+    }
+    return {
+      filePath: gifPath,
+      filename: `clip-router-x-video-${Date.now()}.gif`,
+      mimeType: "image/gif",
+      size: stat.size,
+      cleanupPaths: [palettePath, gifPath]
+    };
+  } catch (error) {
+    await cleanupOwnedPaths([palettePath, gifPath]);
+    throw error;
   }
-  return {
-    filePath: gifPath,
-    filename: `clip-router-x-video-${Date.now()}.gif`,
-    mimeType: "image/gif",
-    size: stat.size
-  };
+}
+
+async function cleanupOwnedPaths(paths) {
+  await Promise.all([...new Set(paths)].map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
 }
 
 function isTwitterUrl(url) {
