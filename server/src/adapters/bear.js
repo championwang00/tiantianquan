@@ -37,6 +37,7 @@ export function __resetBearTestHooks() {
 }
 
 export const __testBuildBearDraftParts = buildBearDraftParts;
+export const __testBuildBearCandidates = buildBearCandidates;
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
@@ -157,9 +158,11 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
   const title = buildTitle(payload, metadata);
   const summary = escapeBearText(metadata.summary || "待补充摘要。");
   const beforeImage = `* **${title}**`;
-  const article = payload.pageContent?.articleHtml
-    ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
-    : String(payload.pageContent?.markdown || "").trim();
+  const article = isInstagramUrl(payload.url)
+    ? ""
+    : (payload.pageContent?.articleHtml
+      ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
+      : String(payload.pageContent?.markdown || "").trim());
   const description = escapeBearText(payload.pageMeta?.description || payload.description || "");
   const afterImage = [
     article ? indentDraftBlock(article) : "",
@@ -221,6 +224,22 @@ async function buildDataUrlPreview(asset) {
 
 async function buildBearCandidates(payload, metadata) {
   const candidates = [];
+  if (isInstagramUrl(payload.url) && payload.pageAssets?.carousel?.length) {
+    candidates.push(...payload.pageAssets.carousel.map((asset, index) => makeCandidate({
+      kind: asset.type === "video" ? "media-url" : "asset-url",
+      sourceType: "instagram",
+      ...(asset.type === "video" ? { mediaUrl: asset.src } : { assetUrl: asset.src }),
+      poster: asset.poster || "",
+      selected: index === 0,
+      label: `Instagram ${asset.type === "video" ? "视频" : "图片"} ${index + 1}`,
+      description: asset.description || "",
+      id: `bear-instagram:${asset.index ?? index}:${asset.type}`,
+      duration: Number(asset.duration || 0),
+      width: Number(asset.width || 0),
+      height: Number(asset.height || 0)
+    })));
+    return candidates;
+  }
   if (isTwitterUrl(payload.url)) {
     const hasVideo = await hasTwitterDownloadableVideo(payload.url).catch(() => false);
     if (hasVideo) {
@@ -342,7 +361,8 @@ function summarizeCandidates(candidates = []) {
     description: candidate.description || "",
     selected: Boolean(candidate.selected),
     width: candidate.width || 0,
-    height: candidate.height || 0
+    height: candidate.height || 0,
+    duration: candidate.duration || 0
   }));
 }
 
@@ -405,7 +425,47 @@ async function resolveBearCandidateAsset(candidate, payload, metadata) {
       label: candidate.label || "图片"
     };
   }
+  if (candidate.kind === "media-url" && candidate.mediaUrl) {
+    const asset = await downloadVideoForBear(candidate.mediaUrl, metadata);
+    return { ...asset, kind: "video", label: candidate.label || "视频" };
+  }
   return null;
+}
+
+async function downloadVideoForBear(url, metadata) {
+  const outputTemplate = path.join(os.tmpdir(), `clip-router-bear-instagram-${Date.now()}-${safeShellName(metadata.titleZh || "video")}.%(ext)s`);
+  const { stdout } = await execFileAsync("yt-dlp", [
+    ...await resolveYtDlpProxyArgs(), "--no-playlist", "-o", outputTemplate,
+    "--print", "after_move:filepath", url
+  ], { timeout: 120000, maxBuffer: 1024 * 1024 * 2 });
+  const filePath = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+  if (!filePath) throw new Error("Instagram 视频下载失败");
+  return { filePath, filename: path.basename(filePath), cleanupPaths: [filePath], source: "yt-dlp-instagram" };
+}
+
+async function resolveYtDlpProxyArgs() {
+  const configured = process.env.CLIP_ROUTER_PROXY_URL || process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (configured) return ["--proxy", configured];
+  if (process.platform !== "darwin") return [];
+  try {
+    const { stdout } = await execFileAsync("/usr/sbin/scutil", ["--proxy"], { timeout: 3000 });
+    for (const prefix of ["HTTPS", "HTTP"]) {
+      const enabled = stdout.match(new RegExp(`(?:^|\\n)\\s*${prefix}Enable\\s*:\\s*1`));
+      const host = stdout.match(new RegExp(`(?:^|\\n)\\s*${prefix}Proxy\\s*:\\s*([^\\s]+)`))?.[1];
+      const port = stdout.match(new RegExp(`(?:^|\\n)\\s*${prefix}Port\\s*:\\s*(\\d+)`))?.[1];
+      if (enabled && host && port) return ["--proxy", `http://${host}:${port}`];
+    }
+  } catch (_error) { /* Direct mode remains available. */ }
+  return [];
+}
+
+function isInstagramUrl(value) {
+  try {
+    const host = new URL(value).hostname;
+    return host === "instagram.com" || host.endsWith(".instagram.com");
+  } catch (_error) {
+    return false;
+  }
 }
 
 async function appendToBear(markdown) {

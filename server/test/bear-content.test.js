@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearDraftParts, confirmBearWrite } from "../src/adapters/bear.js";
+import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, confirmBearWrite } from "../src/adapters/bear.js";
 
 test.afterEach(() => __resetBearTestHooks());
 
@@ -16,6 +16,32 @@ test("places structured article markdown before description and summary", () => 
   assert.match(draft, /## Actual body/);
   assert.ok(draft.indexOf("## Actual body") < draft.indexOf("Publisher description"));
   assert.ok(draft.indexOf("Publisher description") < draft.indexOf("Generated summary"));
+});
+
+test("Instagram Bear drafts omit raw remote image markdown and use native attachments", () => {
+  const draft = __testBuildBearDraftParts({
+    url: "https://www.instagram.com/p/DaKqRpCCjbf",
+    title: "AI OS",
+    pageMeta: { description: "243 likes - AI OS" },
+    pageContent: { markdown: "![unrelated](https://cdn.example/noise.jpg)\nOther page noise" }
+  }, { summary: "AI OS concept" }, null).full;
+  assert.doesNotMatch(draft, /!\[|cdn\.example|Other page noise/);
+  assert.match(draft, /243 likes/);
+  assert.match(draft, /AI OS concept/);
+});
+
+test("Bear and Eagle can consume the same Instagram carousel media set", async () => {
+  const candidates = await __testBuildBearCandidates({
+    url: "https://www.instagram.com/p/DaKqRpCCjbf",
+    pageMeta: {},
+    pageAssets: { carousel: [
+      { index: 0, type: "video", src: "https://cdn.example/video.mp4", poster: "https://cdn.example/cover.jpg", description: "Video", duration: 17 },
+      { index: 1, type: "image", src: "https://cdn.example/one.jpg", description: "One" },
+      { index: 2, type: "image", src: "https://cdn.example/two.jpg", description: "Two" }
+    ] }
+  }, { titleZh: "AI OS" });
+  assert.deepEqual(candidates.map((item) => item.kind), ["media-url", "asset-url", "asset-url"]);
+  assert.deepEqual(candidates.map((item) => item.description), ["Video", "One", "Two"]);
 });
 
 test("materializes selected candidates in candidate order and writes all into one note", async () => {

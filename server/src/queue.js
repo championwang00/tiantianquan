@@ -6,6 +6,7 @@ import { confirmEagleWrite, runEagleAdapter } from "./adapters/eagle.js";
 import { runBearAdapter } from "./adapters/bear.js";
 import { confirmObsidianWrite, runObsidianAdapter } from "./adapters/obsidian.js";
 import { formatDateInShanghai, nowStampForId } from "./utils/time.js";
+import { enrichInstagramPayload } from "./utils/instagram.js";
 
 const tasks = new Map();
 const taskRoot = path.join(os.homedir(), ".openclaw", "workspace", "clip-router", "tasks");
@@ -34,6 +35,8 @@ export async function createTask(payload) {
 export async function runTask(task) {
   updateTask(task, { status: "running" });
   await appendTaskRecord(task);
+
+  task.payload = await enrichInstagramPayload(task.payload);
 
   for (const target of task.payload.targets) {
     const adapter = adapters[target];
