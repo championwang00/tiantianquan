@@ -7,9 +7,67 @@ import {
   buildObsidianOpenUrl,
   buildWritePlan,
   confirmObsidianWrite,
+  localizeMarkdownImages,
   resolveObsidianRevealVaultPath,
   resolveObsidianConfigPaths
 } from "../src/adapters/obsidian.js";
+
+test("buildWritePlan converts article HTML before falling back to captured markdown", () => {
+  const payload = {
+    url: "https://example.com/posts/one",
+    capturedAt: "2026-07-03T00:00:00Z",
+    pageMeta: {},
+    pageContent: { articleHtml: '<article><h2>Hello</h2><img src="/media/a.png"></article>', markdown: "fallback" }
+  };
+  const metadata = { canonicalName: "HTML", titleZh: "HTML", author: { values: [] }, summary: "", tags: [] };
+  const plan = buildWritePlan(payload, { vaultPath: "/vault", clipFolder: "Clippings" }, metadata);
+
+  assert.match(plan.markdown, /## Hello/);
+  assert.match(plan.markdown, /!\[\]\(https:\/\/example\.com\/media\/a\.png\)/);
+  assert.doesNotMatch(plan.markdown, /fallback/);
+});
+
+test("localizes unique remote markdown images beside the note", async () => {
+  const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-images-"));
+  const noteFilePath = path.join(vaultPath, "Clippings", "Article.md");
+  const calls = [];
+  const bytes = new Map([
+    ["https://cdn.example/a", ["image/png", Buffer.from([1, 2, 3])]],
+    ["https://cdn.example/photo_(1).jpg", ["image/jpeg", Buffer.from([4, 5])]]
+  ]);
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    const [type, body] = bytes.get(url);
+    return new Response(body, { headers: { "content-type": type, "content-length": String(body.length) } });
+  };
+  const markdown = [
+    "![one](https://cdn.example/a)",
+    "![duplicate](https://cdn.example/a)",
+    "![two](<https://cdn.example/photo_(1).jpg>)"
+  ].join("\n");
+
+  const localized = await localizeMarkdownImages({ markdown, noteFilePath, fetchImpl });
+
+  assert.deepEqual(calls, ["https://cdn.example/a", "https://cdn.example/photo_(1).jpg"]);
+  assert.equal(localized, [
+    "![one](assets/Article/a.png)",
+    "![duplicate](assets/Article/a.png)",
+    "![two](assets/Article/photo_1.jpg)"
+  ].join("\n"));
+  assert.deepEqual(await fs.readFile(path.join(vaultPath, "Clippings/assets/Article/a.png")), Buffer.from([1, 2, 3]));
+  assert.deepEqual(await fs.readFile(path.join(vaultPath, "Clippings/assets/Article/photo_1.jpg")), Buffer.from([4, 5]));
+});
+
+test("leaves a remote image URL unchanged when its download fails", async () => {
+  const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-images-"));
+  const markdown = "![broken](https://cdn.example/broken.png)";
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: path.join(vaultPath, "Article.md"),
+    fetchImpl: async () => { throw new Error("offline"); }
+  });
+  assert.equal(localized, markdown);
+});
 
 test("resolves a configured mynote/Clippings path against the Document vault root", () => {
   const configuredPath = path.join("/Users/me/iCloud/Obsidian/Documents/mynote/Clippings");

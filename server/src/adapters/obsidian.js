@@ -4,6 +4,7 @@ import path from "node:path";
 import { generateClipMetadata } from "../utils/provider.js";
 import { hostnameFromUrl, safeFileName } from "../utils/webpage.js";
 import { getJournalDate } from "../utils/time.js";
+import { articleHtmlToMarkdown, extractArticleImageUrls } from "../utils/article.js";
 
 const DEFAULT_VAULT = path.join(
   os.homedir(),
@@ -46,9 +47,19 @@ export async function confirmObsidianWrite(task) {
     if (!existing.ok) {
       const filePath = await uniqueFilePath(writePlan.filePath);
       writePlan.filePath = filePath;
+      writePlan.markdown = await localizeMarkdownImages({
+        markdown: writePlan.markdown,
+        noteFilePath: filePath,
+        fetchImpl: globalThis.fetch
+      });
       await fs.writeFile(filePath, writePlan.markdown, "utf8");
     }
   } else {
+    writePlan.markdown = await localizeMarkdownImages({
+      markdown: writePlan.markdown,
+      noteFilePath: writePlan.filePath,
+      fetchImpl: globalThis.fetch
+    });
     await fs.writeFile(writePlan.filePath, writePlan.markdown, "utf8");
   }
 
@@ -99,7 +110,9 @@ async function uniqueFilePath(filePath) {
 function buildStandaloneMarkdown(payload, metadata) {
   const tags = metadata.tags.map((tag) => `  - ${tag}`).join("\n");
   const authors = metadata.author.values.map((author) => `  - ${author}`).join("\n");
-  const originalText = getPreferredOriginalText(payload);
+  const originalText = payload.pageContent?.articleHtml
+    ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
+    : getPreferredOriginalText(payload);
   return [
     "---",
     `title: ${yamlString(metadata.titleZh)}`,
@@ -117,6 +130,61 @@ function buildStandaloneMarkdown(payload, metadata) {
     payload.selectedText && originalText !== payload.selectedText ? ["", "## 摘录", "", payload.selectedText].join("\n") : "",
     payload.userNote ? ["", "## 备注", "", payload.userNote].join("\n") : ""
   ].filter(Boolean).join("\n");
+}
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+export async function localizeMarkdownImages({ markdown, noteFilePath, fetchImpl = globalThis.fetch }) {
+  const source = String(markdown || "");
+  const urls = extractArticleImageUrls(source);
+  if (!urls.length || typeof fetchImpl !== "function") return source;
+
+  const note = path.parse(noteFilePath);
+  const assetDir = path.join(note.dir, "assets", safeFileName(note.name));
+  const replacements = new Map();
+  const usedNames = new Set();
+  for (const url of urls) {
+    try {
+      const response = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
+      if (!response?.ok) throw new Error(`HTTP ${response?.status || "error"}`);
+      const declaredSize = Number(response.headers?.get("content-length") || 0);
+      if (declaredSize > MAX_IMAGE_BYTES) throw new Error("image too large");
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > MAX_IMAGE_BYTES) throw new Error("image too large");
+      const extension = imageExtension(response.headers?.get("content-type"), url);
+      const urlPath = new URL(url).pathname;
+      let stem = safeFileName(path.basename(urlPath, path.extname(urlPath)) || "image")
+        .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+      if (!stem) stem = "image";
+      let fileName = `${stem}${extension}`;
+      for (let suffix = 2; usedNames.has(fileName); suffix += 1) fileName = `${stem}-${suffix}${extension}`;
+      usedNames.add(fileName);
+      await fs.mkdir(assetDir, { recursive: true });
+      await fs.writeFile(path.join(assetDir, fileName), bytes);
+      replacements.set(url, path.posix.join("assets", safeFileName(note.name), fileName));
+    } catch (_error) {
+      // A failed image must not prevent the note itself from being saved.
+    }
+  }
+  return replaceImageDestinations(source, replacements);
+}
+
+function imageExtension(contentType, url) {
+  const type = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+  const byType = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg", "image/avif": ".avif" };
+  if (byType[type]) return byType[type];
+  const candidate = path.extname(new URL(url).pathname).toLowerCase();
+  return /^\.(?:jpe?g|png|gif|webp|svg|avif)$/.test(candidate) ? (candidate === ".jpeg" ? ".jpg" : candidate) : ".img";
+}
+
+function replaceImageDestinations(markdown, replacements) {
+  return markdown.replace(/(!\[[^\n]*?\]\()(<[^>]+>|(?:\\.|[^)])*(?:\((?:\\.|[^)])*\)(?:\\.|[^)])*)?)(\))/g, (match, prefix, destination, close) => {
+    const raw = destination?.startsWith("<") ? destination.slice(1, -1) : destination;
+    const replacement = replacements.get(raw);
+    return replacement ? `${prefix}${replacement}${close}` : match;
+  });
 }
 
 function buildObsidianPreviewFields(payload, metadata, writePlan) {
