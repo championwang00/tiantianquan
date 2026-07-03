@@ -62,6 +62,16 @@ test("extracts only absolute http and https image URLs", () => {
   `), ["https://example.com/a.png", "http://example.com/b.jpg"]);
 });
 
+test("preserves and extracts image URLs containing parentheses", () => {
+  const markdown = articleHtmlToMarkdown(
+    '<article><img src="https://example.com/a_(b).png" alt="diagram"></article>',
+    "https://example.com/post"
+  );
+
+  assert.equal(markdown, "![diagram](<https://example.com/a_(b).png>)");
+  assert.deepEqual(extractArticleImageUrls(markdown), ["https://example.com/a_(b).png"]);
+});
+
 test("escapes hostile markdown text and uses code delimiters longer than content", () => {
   const markdown = articleHtmlToMarkdown(`
     <article>

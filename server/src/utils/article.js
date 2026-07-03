@@ -29,7 +29,7 @@ export function articleHtmlToMarkdown(html, baseUrl) {
     }
     if (tag === "IMG") {
       const src = absoluteUrl(node.getAttribute("src") || node.getAttribute("data-src"), baseUrl);
-      return src ? `![${escapeMarkdownText((node.getAttribute("alt") || "").trim())}](${src})\n\n` : "";
+      return src ? `![${escapeMarkdownText((node.getAttribute("alt") || "").trim())}](${markdownDestination(src)})\n\n` : "";
     }
     if (tag === "BR") return "\n";
     if (tag === "PRE") {
@@ -66,14 +66,47 @@ export function articleHtmlToMarkdown(html, baseUrl) {
 export function extractArticleImageUrls(markdown) {
   const urls = [];
   const seen = new Set();
-  for (const match of String(markdown || "").matchAll(/!\[[^\]]*\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)/g)) {
-    const url = safeAbsoluteHttpUrl(match[1]);
+  for (const destination of imageDestinations(String(markdown || ""))) {
+    const url = safeAbsoluteHttpUrl(destination);
     if (url && !seen.has(url)) {
       seen.add(url);
       urls.push(url);
     }
   }
   return urls;
+}
+
+function* imageDestinations(markdown) {
+  let cursor = 0;
+  while ((cursor = markdown.indexOf("![", cursor)) !== -1) {
+    let labelEnd = cursor + 2;
+    while (labelEnd < markdown.length) {
+      if (markdown[labelEnd] === "]" && markdown[labelEnd - 1] !== "\\") break;
+      labelEnd += 1;
+    }
+    if (markdown.slice(labelEnd, labelEnd + 2) !== "](") {
+      cursor += 2;
+      continue;
+    }
+    const start = labelEnd + 2;
+    if (markdown[start] === "<") {
+      const end = markdown.indexOf(">)", start + 1);
+      if (end !== -1) yield markdown.slice(start + 1, end);
+      cursor = end === -1 ? start : end + 2;
+      continue;
+    }
+    let depth = 0;
+    let end = start;
+    for (; end < markdown.length; end += 1) {
+      if (markdown[end] === "(" && markdown[end - 1] !== "\\") depth += 1;
+      if (markdown[end] === ")" && markdown[end - 1] !== "\\") {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+    }
+    if (end < markdown.length) yield markdown.slice(start, end).trim().split(/\s+["']/)[0];
+    cursor = end + 1;
+  }
 }
 
 function absoluteUrl(value, baseUrl) {
@@ -92,6 +125,10 @@ function safeAbsoluteHttpUrl(value) {
   } catch {
     return "";
   }
+}
+
+function markdownDestination(url) {
+  return /[()\s<>]/.test(url) ? `<${url.replace(/>/g, "%3E")}>` : url;
 }
 
 function escapeMarkdownText(value) {
