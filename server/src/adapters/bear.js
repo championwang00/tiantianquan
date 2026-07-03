@@ -7,6 +7,7 @@ import { generateClipMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { hostnameFromUrl } from "../utils/webpage.js";
 import { loadEnv } from "../utils/env.js";
+import { articleHtmlToMarkdown } from "../utils/article.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BEAR_NOTE_ID = "";
@@ -15,6 +16,26 @@ const BEAR_DB_CANDIDATES = [
   path.join(os.homedir(), "Library", "Group Containers", "9K33E3U3T4.net.shinyfrog.bear", "Application Data", "Bear.sqlite"),
   path.join(os.homedir(), "Library", "Containers", "net.shinyfrog.bear", "Data", "Documents", "Application Data", "database.sqlite")
 ];
+
+const defaultBearDependencies = {
+  resolveCandidate: resolveBearCandidateAsset,
+  append: appendToBear,
+  addFile: addFileToBear,
+  indent: indentBearImageLine,
+  verify: verifyBearUrl,
+  wait
+};
+let bearDependencies = { ...defaultBearDependencies };
+
+export function __setBearTestHooks(hooks = {}) {
+  bearDependencies = { ...bearDependencies, ...hooks };
+}
+
+export function __resetBearTestHooks() {
+  bearDependencies = { ...defaultBearDependencies };
+}
+
+export const __testBuildBearDraftParts = buildBearDraftParts;
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
@@ -52,31 +73,48 @@ async function confirmBearWriteInner(task, options) {
   }
 
   const includeScreenshot = options.includeScreenshot !== false;
-  const selectedAssets = includeScreenshot ? await resolveSelectedBearAssets(task, options) : [];
+  const resolution = includeScreenshot ? await resolveSelectedBearAssets(task, options) : { assets: [], items: [] };
+  const selectedAssets = resolution.assets;
   const draft = includeScreenshot
     ? buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets).full
     : (result.draftNoScreenshot || buildBearDraftParts(task.payload, result.metadata || {}, null).full);
   if (includeScreenshot && selectedAssets.length) {
     const draftParts = buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets);
-    await appendToBear(draftParts.beforeImage);
+    await bearDependencies.append(draftParts.beforeImage);
     for (const asset of selectedAssets) {
-      await addFileToBear(asset.filePath, asset.filename);
-      await wait(900);
-      await indentBearImageLine(asset.filename);
+      const item = resolution.items.find((entry) => entry.asset === asset);
+      try {
+        await bearDependencies.addFile(asset.filePath, asset.filename);
+        await bearDependencies.wait(900);
+        await bearDependencies.indent(asset.filename);
+        if (item) item.status = "success";
+      } catch (error) {
+        if (item) {
+          item.status = "failed";
+          item.error = error.message;
+        }
+      }
     }
-    await appendToBear(draftParts.afterImage);
+    await bearDependencies.append(draftParts.afterImage);
   } else {
-    await appendToBear(draft);
+    await bearDependencies.append(draft);
   }
-  await wait(1800);
-  const verification = await verifyBearUrl(task.payload.url, includeScreenshot ? selectedAssets.map((asset) => asset.filename) : []);
-  const mediaOk = !includeScreenshot || !selectedAssets.length || verification.imageRefCount >= selectedAssets.length;
+  await bearDependencies.wait(1800);
+  const successfulAssets = resolution.items.filter((item) => item.status === "success").map((item) => item.asset);
+  const verification = await bearDependencies.verify(task.payload.url, includeScreenshot ? successfulAssets.map((asset) => asset.filename) : []);
+  const mediaOk = !includeScreenshot || !successfulAssets.length || verification.imageRefCount >= successfulAssets.length;
+  const itemResults = resolution.items.map(({ asset: _asset, ...item }) => item);
+  const succeeded = itemResults.filter((item) => item.status === "success").length;
+  const failed = itemResults.filter((item) => item.status === "failed").length;
   if (verification.count < 1 || !mediaOk) {
     return {
       ...result,
       status: "failed",
       reason: verification.count < 1 ? "Bear x-callback 已调用，但 SQLite 未验证到 URL" : "Bear 已写入 URL，但未验证到媒体引用",
-      verification
+      verification,
+      succeeded,
+      failed,
+      items: itemResults
     };
   }
 
@@ -86,8 +124,11 @@ async function confirmBearWriteInner(task, options) {
     reason: "Bear 写入并验证成功",
     writtenAt: new Date().toISOString(),
     screenshotFile: selectedAssets[0] || result.screenshotFile || null,
-    writtenAssets: selectedAssets,
-    verification
+    writtenAssets: successfulAssets,
+    verification,
+    succeeded,
+    failed,
+    items: itemResults
   };
 }
 
@@ -99,10 +140,16 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
   const title = buildTitle(payload, metadata);
   const summary = (metadata.summary || "待补充摘要。").replace(/\n/g, " ");
   const beforeImage = `* **${title}**`;
+  const article = payload.pageContent?.articleHtml
+    ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
+    : String(payload.pageContent?.markdown || "").trim();
+  const description = String(payload.pageMeta?.description || payload.description || "").trim();
   const afterImage = [
+    article ? indentDraftBlock(article) : "",
+    description ? `  * ${description.replace(/\n/g, " ")}` : "",
     `  * ${summary}`,
     `  * ${payload.url}`
-  ].join("\n");
+  ].filter(Boolean).join("\n");
   const assets = Array.isArray(visualAsset) ? visualAsset : [visualAsset].filter(Boolean);
 
   if (!assets.length) {
@@ -122,6 +169,10 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
       afterImage
     ].join("\n")
   };
+}
+
+function indentDraftBlock(markdown) {
+  return String(markdown).split(/\r?\n/).map((line) => line ? `  ${line}` : "  ").join("\n");
 }
 
 function buildTitle(payload, metadata) {
@@ -283,11 +334,21 @@ async function resolveSelectedBearAssets(task, options = {}) {
     : candidates.filter((candidate) => candidate.selected);
   const selected = selectedCandidates.length ? selectedCandidates : candidates.slice(0, 1);
   const assets = [];
+  const items = [];
   for (const candidate of selected) {
-    const asset = await resolveBearCandidateAsset(candidate, task.payload, result.metadata || {});
-    if (asset) assets.push(asset);
+    try {
+      const asset = await bearDependencies.resolveCandidate(candidate, task.payload, result.metadata || {});
+      if (asset) {
+        assets.push(asset);
+        items.push({ id: candidate.id || "", status: "pending", asset });
+      } else {
+        items.push({ id: candidate.id || "", status: "failed", error: "素材无法解析" });
+      }
+    } catch (error) {
+      items.push({ id: candidate.id || "", status: "failed", error: error.message });
+    }
   }
-  return assets;
+  return { assets, items };
 }
 
 async function resolveBearCandidateAsset(candidate, payload, metadata) {
@@ -843,11 +904,18 @@ async function findSqliteFiles(root, depth) {
   return results;
 }
 
-function withTimeout(promise, ms, message) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
-  ]);
+async function withTimeout(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function escapeSqlLike(value) {
