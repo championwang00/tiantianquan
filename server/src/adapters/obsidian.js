@@ -148,13 +148,26 @@ function buildEmbeddedMediaMarkdown(payload, existingMarkdown = "") {
   const images = buildObsidianMediaImages(payload);
   if (!images.length) return "";
   const existingUrls = new Set(extractArticleImageUrls(existingMarkdown));
+  const existingKeys = new Set([...existingUrls].map(mediaIdentityKey).filter(Boolean));
   return images
-    .filter((image) => !existingUrls.has(image.src))
+    .filter((image) => !existingUrls.has(image.src) && !existingKeys.has(mediaIdentityKey(image.src)))
     .map((image, index) => {
       const alt = escapeMarkdownAlt(image.alt || "配图 " + (index + 1));
       return "![" + alt + "](" + markdownDestination(image.src) + ")";
     })
     .join("\n\n");
+}
+
+function mediaIdentityKey(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname === "pbs.twimg.com" && parsed.pathname.startsWith("/media/")) {
+      return `twitter:${parsed.pathname}`;
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return "";
+  }
 }
 
 function ensureEmbeddedMediaMarkdown(payload, markdown) {
@@ -253,42 +266,58 @@ export async function localizeMarkdownImages({
   timeoutMs = 10_000
 }) {
   const source = String(markdown || "");
-  const urls = extractArticleImageUrls(source);
+  const urls = extractArticleImageUrls(source).filter((url) => !shouldKeepRemoteImage(url));
   if (!urls.length) return source;
 
   const note = path.parse(noteFilePath);
   const assetDir = path.join(note.dir, "assets", safeFileName(note.name));
   const replacements = new Map();
   const usedNames = new Set();
-  for (const url of urls) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("image download timed out")), timeoutMs);
-    try {
-      const { response, finalUrl } = await fetchPublicImage(url, fetchImpl, resolveImpl, controller.signal);
-      if (!response?.ok) throw new Error(`HTTP ${response?.status || "error"}`);
-      const declaredSize = Number(response.headers?.get("content-length") || 0);
-      if (declaredSize > MAX_IMAGE_BYTES) throw new Error("image too large");
-      const extension = imageExtension(response.headers?.get("content-type"));
-      const bytes = await readLimitedBody(response.body, MAX_IMAGE_BYTES, controller.signal);
-      const urlPath = new URL(finalUrl).pathname;
-      let stem = safeFileName(path.basename(urlPath, path.extname(urlPath)) || "image")
-        .replace(/[^\p{L}\p{N}_-]+/gu, "_")
-        .replace(/_+/g, "_")
-        .replace(/^_+|_+$/g, "");
-      if (!stem) stem = "image";
-      let fileName = `${stem}${extension}`;
-      for (let suffix = 2; usedNames.has(fileName); suffix += 1) fileName = `${stem}-${suffix}${extension}`;
-      usedNames.add(fileName);
-      await fs.mkdir(assetDir, { recursive: true });
-      await fs.writeFile(path.join(assetDir, fileName), bytes);
-      replacements.set(url, path.posix.join("assets", safeFileName(note.name), fileName));
-    } catch (_error) {
-      // A failed image must not prevent the note itself from being saved.
-    } finally {
-      clearTimeout(timer);
-    }
+  const assets = await Promise.all(urls.map((url) => materializeRemoteImage(url, fetchImpl, resolveImpl, timeoutMs)));
+  for (const asset of assets.filter(Boolean)) {
+    const { url, finalUrl, extension, bytes } = asset;
+    const urlPath = new URL(finalUrl).pathname;
+    let stem = safeFileName(path.basename(urlPath, path.extname(urlPath)) || "image")
+      .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (!stem) stem = "image";
+    let fileName = `${stem}${extension}`;
+    for (let suffix = 2; usedNames.has(fileName); suffix += 1) fileName = `${stem}-${suffix}${extension}`;
+    usedNames.add(fileName);
+    await fs.mkdir(assetDir, { recursive: true });
+    await fs.writeFile(path.join(assetDir, fileName), bytes);
+    replacements.set(url, path.posix.join("assets", safeFileName(note.name), fileName));
   }
   return replaceImageDestinations(source, replacements);
+}
+
+async function materializeRemoteImage(url, fetchImpl, resolveImpl, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("image download timed out")), timeoutMs);
+  try {
+    const { response, finalUrl } = await fetchPublicImage(url, fetchImpl, resolveImpl, controller.signal);
+    if (!response?.ok) throw new Error(`HTTP ${response?.status || "error"}`);
+    const declaredSize = Number(response.headers?.get("content-length") || 0);
+    if (declaredSize > MAX_IMAGE_BYTES) throw new Error("image too large");
+    const extension = imageExtension(response.headers?.get("content-type"));
+    const bytes = await readLimitedBody(response.body, MAX_IMAGE_BYTES, controller.signal);
+    return { url, finalUrl, extension, bytes };
+  } catch (_error) {
+    // A failed image must not prevent the note itself from being saved.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function shouldKeepRemoteImage(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname === "pbs.twimg.com";
+  } catch (_error) {
+    return false;
+  }
 }
 
 function imageExtension(contentType) {

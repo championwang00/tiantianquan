@@ -154,6 +154,55 @@ test("a stalled body timeout leaves the remote URL unchanged and writes no file"
   await assert.rejects(fs.access(path.join(dir, "assets")));
 });
 
+test("stalled image downloads time out in parallel", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-parallel-stalled-"));
+  let calls = 0;
+  const body = () => new ReadableStream({
+    pull() { return new Promise(() => {}); },
+    cancel() {}
+  });
+  const startedAt = Date.now();
+  const markdown = [
+    "![one](https://cdn.example/one.png)",
+    "![two](https://cdn.example/two.png)"
+  ].join("\n");
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: path.join(dir, "Article.md"),
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(body(), { headers: { "content-type": "image/png" } });
+    },
+    resolveImpl: publicResolver,
+    timeoutMs: 40
+  });
+
+  assert.equal(localized, markdown);
+  assert.equal(calls, 2);
+  assert.ok(Date.now() - startedAt < 90);
+});
+
+test("keeps X CDN images remote to avoid slow Obsidian confirms", async () => {
+  let calls = 0;
+  const markdown = [
+    "![x](https://pbs.twimg.com/media/HMkPQM8bEAA3RAk?format=jpg&name=orig)",
+    "![normal](https://cdn.example/normal.png)"
+  ].join("\n");
+  const localized = await localizeMarkdownImages({
+    markdown,
+    noteFilePath: "/tmp/Article.md",
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(Buffer.from([1]), { headers: { "content-type": "image/png" } });
+    },
+    resolveImpl: publicResolver
+  });
+
+  assert.equal(calls, 1);
+  assert.match(localized, /pbs\.twimg\.com\/media/);
+  assert.match(localized, /assets\/Article\/normal\.png/);
+});
+
 test("preserves optional markdown image titles while localizing", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-title-"));
   const localized = await localizeMarkdownImages({
