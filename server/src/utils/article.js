@@ -27,6 +27,7 @@ export function articleHtmlToMarkdown(html, baseUrl) {
       const href = absoluteUrl(node.getAttribute("href"), baseUrl);
       return href ? `[${label || href}](${href})` : label;
     }
+    if (tag === "TABLE") return tableToMarkdown(node, { ...context, baseUrl });
     if (tag === "IMG") {
       const src = imageSourceUrl(node, baseUrl);
       return src ? `![${escapeMarkdownText((node.getAttribute("alt") || "").trim())}](${markdownDestination(src)})\n\n` : "";
@@ -61,6 +62,63 @@ export function articleHtmlToMarkdown(html, baseUrl) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function tableToMarkdown(table, context = {}) {
+  const rows = [...table.querySelectorAll("tr")]
+    .map((row) => [...row.children]
+      .filter((cell) => cell.tagName === "TH" || cell.tagName === "TD")
+      .map((cell) => tableCellText(cell, context)))
+    .filter((cells) => cells.length);
+  if (!rows.length) return "";
+
+  const width = Math.max(...rows.map((row) => row.length));
+  const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill("")]);
+  const hasHeader = [...table.querySelectorAll("tr")][0]?.children
+    ? [...table.querySelectorAll("tr")][0].children.some((cell) => cell.tagName === "TH")
+    : false;
+  const header = hasHeader ? normalized[0] : normalized[0].map((_, index) => `列 ${index + 1}`);
+  const body = hasHeader ? normalized.slice(1) : normalized;
+
+  return [
+    markdownTableRow(header),
+    markdownTableRow(header.map(() => "---")),
+    ...body.map(markdownTableRow)
+  ].join("\n") + "\n\n";
+}
+
+function tableCellText(cell, context = {}) {
+  return cleanInline([...cell.childNodes]
+    .map((child) => renderTableCellChild(child, context))
+    .join(" "))
+    .replace(/\s*<br>\s*/g, "<br>")
+    .replace(/\|/g, "\\|")
+    .replace(/\n+/g, "<br>");
+}
+
+function renderTableCellChild(node, context = {}) {
+  if (node.nodeType === 3) return node.textContent.replace(/\s+/g, " ");
+  if (node.nodeType !== 1) return "";
+  const tag = node.tagName;
+  if (tag === "BR") return "<br>";
+  if (tag === "IMG") return cellImageText(node, context.baseUrl);
+  if (tag === "A") {
+    const text = cleanInline([...node.childNodes].map((child) => renderTableCellChild(child, context)).join(" "));
+    const href = absoluteUrl(node.getAttribute("href"), context.baseUrl);
+    return href ? `[${escapeMarkdownText(text || href)}](${href})` : text;
+  }
+  return [...node.childNodes].map((child) => renderTableCellChild(child, context)).join(" ");
+}
+
+function cellImageText(node, baseUrl) {
+  const src = imageSourceUrl(node, baseUrl);
+  if (!src) return "";
+  const alt = escapeMarkdownText((node.getAttribute("alt") || "").trim());
+  return `![${alt}](${markdownDestination(src)})`;
+}
+
+function markdownTableRow(cells) {
+  return `| ${cells.map((cell) => String(cell || " ").trim() || " ").join(" | ")} |`;
 }
 
 function imageSourceUrl(node, baseUrl) {

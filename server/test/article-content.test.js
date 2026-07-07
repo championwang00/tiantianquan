@@ -38,6 +38,41 @@ test("supports quotes, ordered lists, fenced code, strong text, and unique image
   ]);
 });
 
+test("converts article tables to markdown tables", () => {
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <table>
+        <tr><th>Loop</th><th>Handoff</th><th>Use when</th></tr>
+        <tr><td>Turn-based</td><td>Check</td><td>Exploring | deciding</td></tr>
+        <tr><td>Dynamic</td><td><a href="/workflow">Workflow</a></td><td>Long<br>running</td></tr>
+      </table>
+    </article>`, "https://example.com/post");
+
+  assert.equal(markdown, [
+    "| Loop | Handoff | Use when |",
+    "| --- | --- | --- |",
+    "| Turn-based | Check | Exploring \\| deciding |",
+    "| Dynamic | [Workflow](https://example.com/workflow) | Long<br>running |"
+  ].join("\n"));
+});
+
+test("adds synthetic headers when an article table has no th row", () => {
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <table>
+        <tr><td>A</td><td>B</td></tr>
+        <tr><td>C</td><td>D</td></tr>
+      </table>
+    </article>`, "https://example.com/post");
+
+  assert.equal(markdown, [
+    "| 列 1 | 列 2 |",
+    "| --- | --- |",
+    "| A | B |",
+    "| C | D |"
+  ].join("\n"));
+});
+
 test("rejects unsafe link and image protocols", () => {
   const markdown = articleHtmlToMarkdown(`
     <article>
