@@ -696,5 +696,35 @@ async function revealObsidianFile(filePath, vaultPath) {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const open = promisify(execFile);
+  await enableObsidianFileExplorerAutoReveal(vaultPath).catch(() => {});
   await open("open", [buildObsidianOpenUrl(filePath, vaultPath)], { timeout: 5000 }).catch(() => {});
+}
+
+export async function enableObsidianFileExplorerAutoReveal(vaultPath) {
+  const workspacePath = path.join(vaultPath, ".obsidian", "workspace.json");
+  const raw = await fs.readFile(workspacePath, "utf8");
+  const workspace = JSON.parse(raw);
+  const changed = setFileExplorerAutoReveal(workspace);
+  if (!changed) return { changed: false, workspacePath };
+  await fs.writeFile(workspacePath, `${JSON.stringify(workspace, null, 2)}\n`, "utf8");
+  return { changed: true, workspacePath };
+}
+
+function setFileExplorerAutoReveal(node) {
+  if (!node || typeof node !== "object") return false;
+  let changed = false;
+  if (node.type === "file-explorer" && node.state && typeof node.state === "object") {
+    if (node.state.autoReveal !== true) {
+      node.state.autoReveal = true;
+      changed = true;
+    }
+  }
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) {
+      for (const item of value) changed = setFileExplorerAutoReveal(item) || changed;
+    } else if (value && typeof value === "object") {
+      changed = setFileExplorerAutoReveal(value) || changed;
+    }
+  }
+  return changed;
 }

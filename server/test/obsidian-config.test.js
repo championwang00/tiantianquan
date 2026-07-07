@@ -7,6 +7,7 @@ import {
   buildObsidianOpenUrl,
   buildWritePlan,
   confirmObsidianWrite,
+  enableObsidianFileExplorerAutoReveal,
   localizeMarkdownImages,
   resolveObsidianRevealVaultPath,
   resolveObsidianConfigPaths
@@ -265,6 +266,34 @@ test("builds an Obsidian open URL from the vault name and relative note path", (
     buildObsidianOpenUrl(filePath, vaultPath),
     "obsidian://open?vault=Documents&file=mynote%2FClippings%2FSample%20Article.md"
   );
+});
+
+test("enables Obsidian file explorer auto reveal for the active vault", async () => {
+  const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-workspace-"));
+  const obsidianDir = path.join(vaultPath, ".obsidian");
+  const workspacePath = path.join(obsidianDir, "workspace.json");
+  await fs.mkdir(obsidianDir, { recursive: true });
+  await fs.writeFile(workspacePath, JSON.stringify({
+    left: {
+      children: [{
+        type: "tabs",
+        children: [{
+          type: "leaf",
+          state: {
+            type: "file-explorer",
+            state: { sortOrder: "alphabetical", autoReveal: false }
+          }
+        }]
+      }]
+    }
+  }), "utf8");
+
+  const result = await enableObsidianFileExplorerAutoReveal(vaultPath);
+  const updated = JSON.parse(await fs.readFile(workspacePath, "utf8"));
+  const leaf = updated.left.children[0].children[0];
+
+  assert.equal(result.changed, true);
+  assert.equal(leaf.state.state.autoReveal, true);
 });
 
 test("prefers the current containing vault over a stale planned vault", () => {
