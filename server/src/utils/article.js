@@ -28,7 +28,7 @@ export function articleHtmlToMarkdown(html, baseUrl) {
       return href ? `[${label || href}](${href})` : label;
     }
     if (tag === "IMG") {
-      const src = absoluteUrl(node.getAttribute("src") || node.getAttribute("data-src"), baseUrl);
+      const src = imageSourceUrl(node, baseUrl);
       return src ? `![${escapeMarkdownText((node.getAttribute("alt") || "").trim())}](${markdownDestination(src)})\n\n` : "";
     }
     if (tag === "BR") return "\n";
@@ -61,6 +61,42 @@ export function articleHtmlToMarkdown(html, baseUrl) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function imageSourceUrl(node, baseUrl) {
+  const candidates = [
+    pickLargestSrcset(node.getAttribute("srcset") || ""),
+    pickLargestSrcset(node.getAttribute("data-srcset") || ""),
+    node.getAttribute("data-original"),
+    node.getAttribute("data-lazy-src"),
+    node.getAttribute("data-image"),
+    node.getAttribute("data-url"),
+    node.getAttribute("data-src"),
+    node.getAttribute("src")
+  ];
+  const picture = node.closest?.("picture");
+  if (picture) {
+    for (const source of [...picture.querySelectorAll("source")]) {
+      candidates.unshift(
+        pickLargestSrcset(source.getAttribute("srcset") || ""),
+        pickLargestSrcset(source.getAttribute("data-srcset") || "")
+      );
+    }
+  }
+  return candidates.map((candidate) => absoluteUrl(candidate, baseUrl)).find(Boolean) || "";
+}
+
+function pickLargestSrcset(srcset) {
+  if (!srcset) return "";
+  return String(srcset)
+    .split(",")
+    .map((part) => {
+      const [src, descriptor] = part.trim().split(/\s+/);
+      const weight = Number(String(descriptor || "").replace(/[^\d.]/g, "")) || 0;
+      return { src, weight };
+    })
+    .filter((item) => item.src)
+    .sort((a, b) => b.weight - a.weight)[0]?.src || "";
 }
 
 export function extractArticleImageUrls(markdown) {

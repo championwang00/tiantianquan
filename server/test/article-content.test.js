@@ -72,6 +72,27 @@ test("preserves and extracts image URLs containing parentheses", () => {
   assert.deepEqual(extractArticleImageUrls(markdown), ["https://example.com/a_(b).png"]);
 });
 
+test("converts lazy and responsive article images for Obsidian localization", () => {
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <picture>
+        <source srcset="/small.webp 640w, /large.webp 1400w">
+        <img src="/placeholder.gif" alt="Hero">
+      </picture>
+      <img data-srcset="/inline-small.jpg 400w, /inline-large.jpg 1200w" alt="Inline">
+      <img data-lazy-src="/lazy.png" alt="Lazy">
+      <img data-original="/original.jpg" alt="Original">
+    </article>`, "https://example.com/posts/one");
+
+  assert.deepEqual(extractArticleImageUrls(markdown), [
+    "https://example.com/large.webp",
+    "https://example.com/inline-large.jpg",
+    "https://example.com/lazy.png",
+    "https://example.com/original.jpg"
+  ]);
+  assert.doesNotMatch(markdown, /placeholder\.gif/);
+});
+
 test("escapes hostile markdown text and uses code delimiters longer than content", () => {
   const markdown = articleHtmlToMarkdown(`
     <article>
