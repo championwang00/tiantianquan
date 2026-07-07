@@ -209,6 +209,32 @@ test("Instagram falls back to captured page media when carousel discovery is emp
   assert.equal(media[0].poster, "https://cdn.example/video-cover.jpg");
 });
 
+test("X image posts expose every primary tweet image as grid candidates", async () => {
+  const candidates = await __testHooks.buildImportCandidates({
+    url: "https://x.com/angehyc/status/2072712904747729140",
+    options: { eagle: { captureMode: "top-image" } },
+    pageMeta: { image: "https://abs.twimg.com/rweb/ssr/default/v2/og/image.png" },
+    pageAssets: {
+      images: [
+        { src: "https://pbs.twimg.com/media/one.jpg?format=jpg&name=orig", alt: "First", width: 1200, height: 900, tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/media/two.jpg?format=jpg&name=orig", alt: "Second", width: 1200, height: 900, tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/media/three.jpg?format=jpg&name=orig", alt: "Third", width: 1200, height: 900, tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/profile_images/avatar.jpg", alt: "Avatar", width: 400, height: 400, tweetScope: "" }
+      ],
+      videos: []
+    },
+    pageContent: {}
+  }, { titleZh: "X 多图" });
+
+  const media = __testHooks.summarizeCandidates(candidates).filter((candidate) => candidate.kind === "asset-url");
+  assert.deepEqual(media.map((candidate) => candidate.assetUrl), [
+    "https://pbs.twimg.com/media/one.jpg?format=jpg&name=orig",
+    "https://pbs.twimg.com/media/two.jpg?format=jpg&name=orig",
+    "https://pbs.twimg.com/media/three.jpg?format=jpg&name=orig"
+  ]);
+  assert.equal(media[0].selected, true);
+});
+
 test("generic websites expose captured videos alongside images", async () => {
   const candidates = await __testHooks.buildImportCandidates({
     url: "https://example.com/gallery",
@@ -347,6 +373,16 @@ test("background and popup Instagram capture keep transition, cap, restoration, 
     assert.match(source, /svg title/);
     assert.doesNotMatch(source, /carouselRoot/);
     assert.match(source, /\.\.\.root\.querySelectorAll\('video, img'\)/);
+  }
+});
+
+test("background and popup mark X primary tweet images for media grids", () => {
+  for (const relative of ["../../extension/background.js", "../../extension/popup.js"]) {
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, relative), "utf8");
+    assert.match(source, /tweetScopeForImage/);
+    assert.match(source, /tweetScope: scope/);
+    assert.match(source, /parsed\.hostname === "pbs\.twimg\.com"/);
+    assert.match(source, /parsed\.searchParams\.set\("name", "orig"\)/);
   }
 });
 

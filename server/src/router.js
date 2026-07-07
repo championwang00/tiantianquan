@@ -162,7 +162,7 @@ function normalizeCandidateIds(body = {}) {
   return (Array.isArray(value) ? value : [value]).filter((id) => typeof id === "string" && id.length > 0);
 }
 
-export const __testHooks = { normalizeCandidateIds };
+export const __testHooks = { normalizeCandidateIds, validatePayload };
 
 function corsHeaders(env, origin) {
   const allowed = env.CLIP_ROUTER_ALLOWED_EXTENSION_ID || "*";
@@ -307,6 +307,7 @@ function sanitizePageAssets(value) {
     images: Array.isArray(assets.images) ? assets.images.slice(0, 20) : [],
     videos: Array.isArray(assets.videos) ? assets.videos.slice(0, 10) : [],
     videoRects: Array.isArray(assets.videoRects) ? assets.videoRects.slice(0, 5) : [],
+    carousel: Array.isArray(assets.carousel) ? assets.carousel.slice(0, 30) : [],
     viewport: sanitizeObject(assets.viewport)
   };
 }
@@ -316,6 +317,7 @@ function sanitizePageContent(value) {
   return {
     text: typeof content.text === "string" ? content.text.slice(0, 60000) : "",
     markdown: typeof content.markdown === "string" ? content.markdown.slice(0, 100000) : "",
+    articleHtml: typeof content.articleHtml === "string" ? content.articleHtml.slice(0, 250000) : "",
     htmlSnapshot: typeof content.htmlSnapshot === "string" ? content.htmlSnapshot.slice(0, 250000) : ""
   };
 }

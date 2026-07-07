@@ -69,6 +69,27 @@ test("generic websites expose captured videos and images through the same Bear m
   assert.deepEqual(candidates.map((item) => item.kind), ["media-url", "asset-url"]);
 });
 
+test("Bear lists every primary X image in the shared media grid", async () => {
+  const candidates = await __testBuildBearCandidates({
+    url: "https://x.com/angehyc/status/2072712904747729140",
+    pageMeta: { image: "https://abs.twimg.com/rweb/ssr/default/v2/og/image.png" },
+    pageAssets: {
+      images: [
+        { src: "https://pbs.twimg.com/media/one.jpg?format=jpg&name=orig", alt: "One", width: 1200, height: 900, tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/media/two.jpg?format=jpg&name=orig", alt: "Two", width: 1200, height: 900, tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/profile_images/avatar.jpg", alt: "Avatar", width: 400, height: 400, tweetScope: "" },
+        { src: "https://pbs.twimg.com/media/three.jpg?format=jpg&name=orig", alt: "Three", width: 1200, height: 900, tweetScope: "primary" }
+      ]
+    }
+  }, { titleZh: "X 多图" });
+
+  assert.deepEqual(candidates.filter((item) => item.kind === "asset-url").map((item) => item.assetUrl), [
+    "https://pbs.twimg.com/media/one.jpg?format=jpg&name=orig",
+    "https://pbs.twimg.com/media/two.jpg?format=jpg&name=orig",
+    "https://pbs.twimg.com/media/three.jpg?format=jpg&name=orig"
+  ]);
+});
+
 test("materializes selected candidates in candidate order and writes all into one note", async () => {
   const events = [];
   __setBearTestHooks({

@@ -516,13 +516,13 @@ async function collectPageContext(tab, options = {}) {
         function collectImages(deep, scopeRoot = null) {
           const seen = new Set();
           const items = [];
-          const push = (src, alt = "", width = 0, height = 0) => {
-            const normalized = absolutize(src);
+          const push = (src, alt = "", width = 0, height = 0, scope = "") => {
+            const normalized = normalizeImageAssetUrl(absolutize(src));
             if (!normalized || seen.has(normalized)) return;
             if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
             if (isXDefaultOgImage(normalized)) return;
             seen.add(normalized);
-            items.push({ src: normalized, alt, width, height });
+            items.push({ src: normalized, alt, width, height, tweetScope: scope });
           };
 
           const imageNodes = scopeRoot ? [...scopeRoot.querySelectorAll("img")].filter((image) => image.closest("article") === scopeRoot) : [...document.images];
@@ -534,7 +534,8 @@ async function collectPageContext(tab, options = {}) {
               fromSrcset || image.currentSrc || image.getAttribute("data-src") || image.getAttribute("data-original") || image.src,
               image.alt || "",
               image.naturalWidth || image.width || 0,
-              image.naturalHeight || image.height || 0
+              image.naturalHeight || image.height || 0,
+              tweetScopeForImage(image, scopeRoot)
             );
           }
 
@@ -542,13 +543,31 @@ async function collectPageContext(tab, options = {}) {
             const styledNodes = scopeRoot ? [...scopeRoot.querySelectorAll("[style]")] : [...document.querySelectorAll("[style]")];
             for (const node of styledNodes) {
               const match = String(node.getAttribute("style") || "").match(/url\\((['"]?)(.*?)\\1\\)/);
-              if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0);
+              if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0, tweetScopeForImage(node, scopeRoot));
             }
           }
 
           return items
-            .filter((image) => image.width >= 180 || image.height >= 180 || /xiaohongshu|xhscdn|sns-webpic|sns-img/i.test(image.src))
+            .filter((image) => image.width >= 180 || image.height >= 180 || /pbs\.twimg\.com\/media|xiaohongshu|xhscdn|sns-webpic|sns-img/i.test(image.src))
             .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+        }
+
+        function tweetScopeForImage(node, scopeRoot = null) {
+          if (!scopeRoot) return "";
+          return node.closest("article") === scopeRoot ? "primary" : "";
+        }
+
+        function normalizeImageAssetUrl(src) {
+          if (!src) return "";
+          try {
+            const parsed = new URL(src, location.href);
+            if (parsed.hostname === "pbs.twimg.com" && parsed.pathname.startsWith("/media/")) {
+              parsed.searchParams.set("name", "orig");
+            }
+            return parsed.toString();
+          } catch (_error) {
+            return src;
+          }
         }
 
         function normalizeMetaImage(src) {
