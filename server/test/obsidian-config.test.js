@@ -27,6 +27,29 @@ test("buildWritePlan converts article HTML before falling back to captured markd
   assert.doesNotMatch(plan.markdown, /fallback/);
 });
 
+test("buildWritePlan embeds primary X images for Obsidian notes", () => {
+  const payload = {
+    url: "https://x.com/ClaudeDevs/status/2074208949205881033",
+    capturedAt: "2026-07-07T00:00:00Z",
+    pageMeta: {},
+    pageContent: { text: "Getting started with loops" },
+    pageAssets: {
+      images: [
+        { src: "https://pbs.twimg.com/media/HMkPQM8bEAA3RAk?format=jpg&name=small", alt: "Loop 1", tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/media/HMkOlk3bcAAHX46?format=jpg&name=orig", alt: "Loop 2", tweetScope: "primary" },
+        { src: "https://pbs.twimg.com/profile_images/avatar.jpg", alt: "Avatar", tweetScope: "" }
+      ]
+    }
+  };
+  const metadata = { canonicalName: "X Loops", titleZh: "X Loops", author: { values: [] }, summary: "", tags: [] };
+  const plan = buildWritePlan(payload, { vaultPath: "/vault", clipFolder: "Clippings" }, metadata);
+
+  assert.match(plan.markdown, /## 配图/);
+  assert.match(plan.markdown, /HMkPQM8bEAA3RAk\?format=jpg&name=orig/);
+  assert.match(plan.markdown, /HMkOlk3bcAAHX46\?format=jpg&name=orig/);
+  assert.doesNotMatch(plan.markdown, /profile_images/);
+});
+
 test("localizes unique remote markdown images beside the note", async () => {
   const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-images-"));
   const noteFilePath = path.join(vaultPath, "Clippings", "Article.md");
@@ -307,4 +330,51 @@ test("confirm is idempotent when the planned file was already written", async ()
   assert.equal(first.status, "success");
   assert.equal(second.status, "success");
   assert.deepEqual(files, ["Idempotent Clip.md"]);
+});
+
+test("confirm repairs an existing clip that was created before media was embedded", async () => {
+  const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-repair-media-"));
+  const filePath = path.join(vaultPath, "Clippings", "Old X Clip.md");
+  const oldMarkdown = [
+    "---",
+    "title: Old X Clip",
+    "source: https://example.com/old",
+    "author:",
+    "published:",
+    "created:",
+    "description:",
+    "tags:",
+    "---",
+    "",
+    "Existing body"
+  ].join("\n");
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, oldMarkdown, "utf8");
+
+  const task = {
+    payload: {
+      url: "https://example.com/old",
+      pageAssets: {
+        images: [{ src: "http://localhost/image.png", alt: "Recovered image" }]
+      }
+    },
+    results: {
+      obsidian: {
+        writePlan: {
+          mode: "clip",
+          vaultPath,
+          reveal: false,
+          filePath,
+          markdown: oldMarkdown
+        }
+      }
+    }
+  };
+
+  const result = await confirmObsidianWrite(task);
+  const repaired = await fs.readFile(filePath, "utf8");
+
+  assert.equal(result.status, "success");
+  assert.match(repaired, /## 配图/);
+  assert.match(repaired, /!\[配图 1\]\(http:\/\/localhost\/image\.png\)/);
 });

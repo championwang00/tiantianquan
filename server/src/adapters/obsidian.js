@@ -46,6 +46,7 @@ export async function confirmObsidianWrite(task) {
   }
 
   const { writePlan } = result;
+  writePlan.markdown = ensureEmbeddedMediaMarkdown(task.payload, writePlan.markdown);
   await fs.mkdir(path.dirname(writePlan.filePath), { recursive: true });
   if (await pathExists(writePlan.filePath)) {
     const existing = await verifyObsidianFile(writePlan.filePath, task.payload.url);
@@ -57,6 +58,12 @@ export async function confirmObsidianWrite(task) {
         noteFilePath: filePath
       });
       await fs.writeFile(filePath, writePlan.markdown, "utf8");
+    } else if (await shouldRepairExistingMedia(writePlan.filePath, writePlan.markdown)) {
+      writePlan.markdown = await appendMissingMediaBlock({
+        existingFilePath: writePlan.filePath,
+        plannedMarkdown: writePlan.markdown
+      });
+      await fs.writeFile(writePlan.filePath, writePlan.markdown, "utf8");
     }
   } else {
     writePlan.markdown = await localizeMarkdownImages({
@@ -116,6 +123,7 @@ function buildStandaloneMarkdown(payload, metadata) {
   const originalText = payload.pageContent?.articleHtml
     ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
     : getPreferredOriginalText(payload);
+  const mediaMarkdown = buildEmbeddedMediaMarkdown(payload, originalText);
   return [
     "---",
     `title: ${yamlString(metadata.titleZh)}`,
@@ -130,9 +138,109 @@ function buildStandaloneMarkdown(payload, metadata) {
     "---",
     "",
     originalText || payload.selectedText || payload.pageMeta?.description || metadata.summary,
+    mediaMarkdown ? ["", "## 配图", "", mediaMarkdown].join("\n") : "",
     payload.selectedText && originalText !== payload.selectedText ? ["", "## 摘录", "", payload.selectedText].join("\n") : "",
     payload.userNote ? ["", "## 备注", "", payload.userNote].join("\n") : ""
   ].filter(Boolean).join("\n");
+}
+
+function buildEmbeddedMediaMarkdown(payload, existingMarkdown = "") {
+  const images = buildObsidianMediaImages(payload);
+  if (!images.length) return "";
+  const existingUrls = new Set(extractArticleImageUrls(existingMarkdown));
+  return images
+    .filter((image) => !existingUrls.has(image.src))
+    .map((image, index) => {
+      const alt = escapeMarkdownAlt(image.alt || "配图 " + (index + 1));
+      return "![" + alt + "](" + markdownDestination(image.src) + ")";
+    })
+    .join("\n\n");
+}
+
+function ensureEmbeddedMediaMarkdown(payload, markdown) {
+  const mediaMarkdown = buildEmbeddedMediaMarkdown(payload, markdown);
+  if (!mediaMarkdown) return markdown;
+  const heading = String(markdown || "").includes("\n## 配图") ? "" : "\n\n## 配图";
+  return [String(markdown || "").replace(/\s+$/g, ""), heading, mediaMarkdown].filter(Boolean).join("\n\n");
+}
+
+function buildObsidianMediaImages(payload) {
+  const seen = new Set();
+  const twitter = isTwitterUrl(payload.url);
+  return (payload.pageAssets?.images || [])
+    .filter((image) => !twitter || image.tweetScope === "primary")
+    .map((image) => ({ ...image, src: normalizeObsidianImageUrl(image.src || "", twitter) }))
+    .filter((image) => {
+      if (!image.src || seen.has(image.src)) return false;
+      if (twitter && !isTwitterMediaImage(image.src)) return false;
+      seen.add(image.src);
+      return true;
+    })
+    .slice(0, twitter ? 4 : 12);
+}
+
+function normalizeObsidianImageUrl(value, twitter = false) {
+  const text = String(value || "").trim();
+  if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
+  try {
+    const parsed = new URL(text);
+    if (twitter && parsed.hostname === "pbs.twimg.com" && parsed.pathname.startsWith("/media/")) {
+      parsed.searchParams.set("name", "orig");
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function isTwitterUrl(value) {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname === "x.com" || hostname === "twitter.com" || hostname.endsWith(".x.com") || hostname.endsWith(".twitter.com");
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isTwitterMediaImage(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname === "pbs.twimg.com" && parsed.pathname.startsWith("/media/");
+  } catch (_error) {
+    return false;
+  }
+}
+
+function escapeMarkdownAlt(value) {
+  return String(value || "").replace(/([\\\]\\`*_{}<>#])/g, "\\$1").replace(/[\r\n]+/g, " ").trim();
+}
+
+function markdownDestination(url) {
+  return /[()\s<>]/.test(url) ? "<" + url.replace(/>/g, "%3E") + ">" : url;
+}
+
+async function shouldRepairExistingMedia(filePath, plannedMarkdown) {
+  const plannedUrls = extractArticleImageUrls(plannedMarkdown);
+  if (!plannedUrls.length) return false;
+  const existing = await fs.readFile(filePath, "utf8");
+  const existingUrls = new Set(extractArticleImageUrls(existing));
+  return plannedUrls.some((url) => !existingUrls.has(url));
+}
+
+async function appendMissingMediaBlock({ existingFilePath, plannedMarkdown }) {
+  const existing = await fs.readFile(existingFilePath, "utf8");
+  const existingUrls = new Set(extractArticleImageUrls(existing));
+  const urls = extractArticleImageUrls(plannedMarkdown).filter((url) => !existingUrls.has(url));
+  if (!urls.length) return existing;
+  const mediaBlock = urls
+    .map((url, index) => "![配图 " + (index + 1) + "](" + markdownDestination(url) + ")")
+    .join("\n\n");
+  const localized = await localizeMarkdownImages({
+    markdown: mediaBlock,
+    noteFilePath: existingFilePath
+  });
+  const heading = existing.includes("\n## 配图") ? "" : "\n\n## 配图";
+  return [existing.replace(/\s+$/g, ""), heading, localized].filter(Boolean).join("\n\n");
 }
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
