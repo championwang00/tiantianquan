@@ -75,6 +75,14 @@ test("all website media grids show only media, with video corner badges and hove
   assert.doesNotMatch(popupCss, /\.media-badges\s*\{[^}]*top:/s);
 });
 
+test("Eagle and Bear scan generic page media beyond site-specific adapters", () => {
+  assert.match(popupJs, /target === "eagle" \|\| target === "bear" \|\| isRichMedia/);
+  assert.match(popupJs, /performance\.getEntriesByType\("resource"\)/);
+  assert.match(popupJs, /user-attachments\\\/assets/);
+  assert.match(popupJs, /source === "video-element"/);
+  assert.match(popupJs, /source\.startsWith\("attr:data-video"\)/);
+});
+
 test("Instagram carousel traversal falls back to main when Dia omits article", () => {
   for (const source of [popupJs, backgroundJs]) {
     assert.match(source, /document\.querySelector\('main article'\).*document\.querySelector\('article'\).*document\.querySelector\('main'\)/s);

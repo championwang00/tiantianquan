@@ -592,7 +592,11 @@ function buildContentVideoCandidates(payload, sourceType, options = {}) {
         selected: Boolean(options.selectedFirst && index === 0),
         label: video.label || `${options.labelPrefix || "内容视频"} ${index + 1}`,
         description: video.label || "",
-        id: `content-video:${index + 1}:${safeShellName(src)}`
+        id: `content-video:${index + 1}:${safeShellName(src)}`,
+        source: video.source || "",
+        width: Number(video.width || 0),
+        height: Number(video.height || 0),
+        duration: Number(video.duration || 0)
       });
     })
     .filter(Boolean)
@@ -1111,6 +1115,7 @@ function summarizeImportPlan(importPlan) {
     width: importPlan.width || 0,
     height: importPlan.height || 0,
     duration: importPlan.duration || 0,
+    source: importPlan.source || "",
     carouselIndex: importPlan.carouselIndex,
     postUrl: importPlan.postUrl || "",
     mediaId: importPlan.mediaId || "",

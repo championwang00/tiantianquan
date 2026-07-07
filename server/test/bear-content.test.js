@@ -62,11 +62,17 @@ test("generic websites expose captured videos and images through the same Bear m
     url: "https://example.com/gallery",
     pageMeta: {},
     pageAssets: {
-      videos: [{ src: "https://cdn.example/demo.mp4", poster: "https://cdn.example/demo.jpg", label: "Demo" }],
+      videos: [
+        { src: "https://github.com/user-attachments/assets/number-flow-demo", poster: "https://cdn.example/demo.jpg", label: "GitHub README demo", source: "performance", width: 1280, height: 720, duration: 6.5 },
+        { src: "https://cdn.example/demo.mp4", poster: "https://cdn.example/demo.jpg", label: "Demo" }
+      ],
       images: [{ src: "https://cdn.example/one.jpg", alt: "One" }]
     }
   }, { titleZh: "Gallery" });
-  assert.deepEqual(candidates.map((item) => item.kind), ["media-url", "asset-url"]);
+  assert.deepEqual(candidates.map((item) => item.kind), ["media-url", "media-url", "asset-url"]);
+  assert.equal(candidates[0].mediaUrl, "https://github.com/user-attachments/assets/number-flow-demo");
+  assert.equal(candidates[0].source, "performance");
+  assert.equal(candidates[0].duration, 6.5);
 });
 
 test("Bear lists every primary X image in the shared media grid", async () => {

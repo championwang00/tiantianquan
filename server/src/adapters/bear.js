@@ -274,7 +274,11 @@ async function buildBearCandidates(payload, metadata) {
         selected: candidates.length === 0,
         label: video.label || `页面视频 ${index + 1}`,
         description: video.label || "",
-        id: `bear-content-video:${index + 1}:${safeShellName(mediaUrl)}`
+        id: `bear-content-video:${index + 1}:${safeShellName(mediaUrl)}`,
+        source: video.source || "",
+        width: Number(video.width || 0),
+        height: Number(video.height || 0),
+        duration: Number(video.duration || 0)
       }));
     }
   }
@@ -384,7 +388,8 @@ function summarizeCandidates(candidates = []) {
     selected: Boolean(candidate.selected),
     width: candidate.width || 0,
     height: candidate.height || 0,
-    duration: candidate.duration || 0
+    duration: candidate.duration || 0,
+    source: candidate.source || ""
   }));
 }
 

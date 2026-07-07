@@ -298,7 +298,7 @@ async function buildPayload(target) {
   const isRichMedia = isRichMediaUrl(activeTab?.url || "");
   const needsScreenshot = (target === "eagle" && (getEagleCaptureMode() === "screenshot" || isRichMedia)) || target === "bear";
   const needsFullContent = target !== "eagle" || getEagleCaptureMode() === "snapshot";
-  const needsDeepAssets = target !== "eagle" || isRichMedia || getEagleCaptureMode() === "top-image";
+  const needsDeepAssets = target === "eagle" || target === "bear" || isRichMedia;
   const [screenshotDataUrl, pageContext] = await Promise.all([
     needsScreenshot
       ? withTimeout(captureVisibleTabSafely(), 4000, "截图超时").catch(() => "")
@@ -359,8 +359,8 @@ async function collectPageContext(tab, options = {}) {
         const article = findReadableRoot(mainTweetRoot);
         const structuredArticle = mainTweetRoot || findArticleRoot();
         const visibleText = getVisibleText(article);
-        const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 20 : 6);
-        const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 10) : [];
+        const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 30 : 6);
+        const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 20) : [];
         const videoRects = deepAssets ? collectVideoRects(mainTweetRoot).slice(0, 5) : [];
         const carousel = deepAssets ? await collectInstagramCarousel() : [];
         const content = fullContent
@@ -582,20 +582,47 @@ async function collectPageContext(tab, options = {}) {
         function collectVideos(scopeRoot = null) {
           const seen = new Set();
           const items = [];
-          const push = (src, label = "", poster = "") => {
+          const push = (src, label = "", poster = "", detail = {}) => {
             const normalized = absolutize(cleanEscapedUrl(src));
             if (!normalized || seen.has(normalized)) return;
             if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
-            if (!isLikelyVideoUrl(normalized)) return;
+            if (!isLikelyVideoUrl(normalized, detail)) return;
             seen.add(normalized);
-            items.push({ src: normalized, label, poster: normalizeMetaImage(poster || "") });
+            items.push({
+              src: normalized,
+              label,
+              poster: normalizeMetaImage(poster || ""),
+              source: detail.source || "",
+              width: Number(detail.width || 0),
+              height: Number(detail.height || 0),
+              duration: Number(detail.duration || 0)
+            });
           };
 
           const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => video.closest("article") === scopeRoot) : [...document.querySelectorAll("video")];
           for (const video of videoNodes) {
-            push(video.currentSrc || video.src, video.getAttribute("aria-label") || video.title || "页面视频", video.poster || "");
+            const detail = {
+              source: "video-element",
+              width: video.videoWidth || video.clientWidth || 0,
+              height: video.videoHeight || video.clientHeight || 0,
+              duration: Number.isFinite(video.duration) ? video.duration : 0
+            };
+            push(video.currentSrc || video.src, video.getAttribute("aria-label") || video.title || "页面视频", video.poster || "", detail);
             for (const source of [...video.querySelectorAll("source")]) {
-              push(source.src || source.getAttribute("src"), source.type || "页面视频", video.poster || "");
+              push(source.src || source.getAttribute("src"), source.type || "页面视频", video.poster || "", detail);
+            }
+            for (const name of ["data-src", "data-video-src", "data-mp4", "data-url"]) {
+              push(video.getAttribute(name), video.getAttribute("aria-label") || video.title || "页面视频", video.poster || "", detail);
+            }
+          }
+
+          if (!scopeRoot) {
+            for (const node of [...document.querySelectorAll("[data-video-url], [data-video-src], [data-mp4], [data-stream-url], [data-src], [href], [src]")].slice(0, 1200)) {
+              for (const name of ["data-video-url", "data-video-src", "data-mp4", "data-stream-url", "data-src", "href", "src"]) {
+                const value = node.getAttribute(name);
+                if (!value) continue;
+                push(value, node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 80) || "页面视频", "", { source: `attr:${name}` });
+              }
             }
           }
 
@@ -610,15 +637,21 @@ async function collectPageContext(tab, options = {}) {
             'meta[name="twitter:player"]'
           ]) {
             const value = metaContent(selector);
-            push(value, "页面视频", normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')));
+            push(value, "页面视频", normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')), { source: "meta" });
+          }
+
+          if (!scopeRoot && performance?.getEntriesByType) {
+            for (const entry of performance.getEntriesByType("resource").slice(-800)) {
+              push(entry.name, "已加载视频资源", "", { source: "performance", initiatorType: entry.initiatorType || "" });
+            }
           }
 
           const scriptText = scopeRoot ? "" : [...document.scripts]
             .map((script) => script.textContent || "")
-            .filter((text) => /mp4|m3u8|video|stream/i.test(text))
+            .filter((text) => /mp4|m4v|mov|webm|m3u8|video|stream|user-attachments\/assets/i.test(text))
             .join("\n")
             .slice(0, 800000);
-          for (const url of extractVideoUrls(scriptText)) push(url, "页面视频");
+          for (const url of extractVideoUrls(scriptText)) push(url, "页面视频", "", { source: "script" });
 
           return items;
         }
@@ -650,9 +683,9 @@ async function collectPageContext(tab, options = {}) {
 
         function extractVideoUrls(text) {
           const urls = new Set();
-          const directPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?(?:\.mp4|\.m3u8)(?:\?[^"'\\\s<>]*)?/gi;
+          const directPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?(?:(?:\.mp4|\.m4v|\.mov|\.webm|\.m3u8)(?:\?[^"'\\\s<>]*)?|\/user-attachments\/assets\/[^"'\\\s<>]+)/gi;
           for (const match of text.matchAll(directPattern)) urls.add(match[0]);
-          const escapedPattern = /https?:\\\\\/\\\\\/[^"'\\\s<>]+?(?:\.mp4|\.m3u8)(?:\\[^"'\\\s<>]*)?/gi;
+          const escapedPattern = /https?:\\\\\/\\\\\/[^"'\\\s<>]+?(?:(?:\.mp4|\.m4v|\.mov|\.webm|\.m3u8)(?:\\[^"'\\\s<>]*)?|\/user-attachments\/assets\/[^"'\\\s<>]+)/gi;
           for (const match of text.matchAll(escapedPattern)) urls.add(match[0]);
           return [...urls].map(cleanEscapedUrl);
         }
@@ -667,9 +700,19 @@ async function collectPageContext(tab, options = {}) {
             .replace(/\\u003F/g, "?");
         }
 
-        function isLikelyVideoUrl(url) {
+        function isLikelyVideoUrl(url, detail = {}) {
+          const source = String(detail.source || "");
+          const initiatorType = String(detail.initiatorType || "");
           return /\.(mp4|m4v|mov|webm|m3u8)(?:[?#]|$)/i.test(url)
-            || /video|stream|m3u8|mp4|sns-video|xhscdn/i.test(url);
+            || /video|stream|m3u8|mp4|sns-video|xhscdn/i.test(url)
+            || (/user-attachments\/assets/i.test(url) && (
+              source === "video-element"
+              || source === "script"
+              || source === "meta"
+              || source.startsWith("attr:data-video")
+              || source === "attr:data-mp4"
+              || /video|media/i.test(initiatorType)
+            ));
         }
 
         function pickLargestSrcset(srcset) {
@@ -771,7 +814,7 @@ async function collectPageContext(tab, options = {}) {
 }
 
 function emptyPageContext() {
-  return { meta: {}, assets: { images: [], videos: [], videoRects: [], carousel: [] }, content: { text: "", markdown: "", htmlSnapshot: "" } };
+  return { meta: {}, assets: { images: [], videos: [], videoRects: [], carousel: [], viewport: {} }, content: { text: "", markdown: "", articleHtml: "", htmlSnapshot: "" } };
 }
 
 function isRichMediaUrl(url) {

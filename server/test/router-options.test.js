@@ -14,7 +14,7 @@ test("keeps structured media fields used by grid candidates", () => {
     targets: ["eagle"],
     pageAssets: {
       images: [{ src: "https://cdn.example/one.jpg", tweetScope: "primary" }],
-      videos: [{ src: "https://cdn.example/one.mp4" }],
+      videos: [{ src: "https://cdn.example/one.mp4", source: "performance", width: 1280, height: 720, duration: 5 }],
       carousel: [
         { index: 0, type: "image", src: "https://cdn.example/a.jpg" },
         { index: 1, type: "video", src: "https://cdn.example/b.mp4" }
@@ -28,6 +28,8 @@ test("keeps structured media fields used by grid candidates", () => {
   });
 
   assert.equal(payload.pageAssets.images[0].tweetScope, "primary");
+  assert.equal(payload.pageAssets.videos[0].source, "performance");
+  assert.equal(payload.pageAssets.videos[0].duration, 5);
   assert.deepEqual(payload.pageAssets.carousel.map((item) => item.type), ["image", "video"]);
   assert.equal(payload.pageContent.articleHtml, "<article>body</article>");
 });

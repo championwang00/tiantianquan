@@ -241,13 +241,19 @@ test("generic websites expose captured videos alongside images", async () => {
     options: { eagle: { captureMode: "top-image" } },
     pageMeta: {},
     pageAssets: {
-      videos: [{ src: "https://cdn.example/demo.mp4", poster: "https://cdn.example/demo.jpg", label: "Demo" }],
+      videos: [
+        { src: "https://github.com/user-attachments/assets/number-flow-demo", poster: "https://cdn.example/demo.jpg", label: "GitHub README demo", source: "performance", width: 1280, height: 720, duration: 6.5 },
+        { src: "https://cdn.example/demo.mp4", poster: "https://cdn.example/demo.jpg", label: "Demo" }
+      ],
       images: [{ src: "https://cdn.example/one.jpg", alt: "One" }]
     },
     pageContent: {}
   }, { titleZh: "Gallery" });
   const media = __testHooks.summarizeCandidates(candidates).filter((item) => ["media-url", "asset-url"].includes(item.kind));
-  assert.deepEqual(media.map((item) => item.kind), ["media-url", "asset-url"]);
+  assert.deepEqual(media.map((item) => item.kind), ["media-url", "media-url", "asset-url"]);
+  assert.equal(media[0].mediaUrl, "https://github.com/user-attachments/assets/number-flow-demo");
+  assert.equal(media[0].source, "performance");
+  assert.equal(media[0].duration, 6.5);
 });
 
 test("extracts every Instagram carousel item from embedded Relay data when the post has no article DOM", () => {
