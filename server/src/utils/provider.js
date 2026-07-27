@@ -20,7 +20,9 @@ export function __resetProviderTestHooks() {
 }
 
 export async function generateClipMetadata(payload, target) {
-  const cacheKey = JSON.stringify([payload.url || "", payload.title || "", payload.pageMeta?.description || "", payload.selectedText || "", payload.userNote || ""]);
+  const isTweet = /(?:^|\.)x\.com$|(?:^|\.)twitter\.com$/i.test(new URL(payload.url || "https://invalid.local").hostname);
+  const pageText = resolveMetadataText(payload, isTweet);
+  const cacheKey = JSON.stringify([payload.url || "", payload.title || "", payload.pageMeta?.description || "", pageText, payload.selectedText || "", payload.userNote || ""]);
   const cached = metadataCache.get(cacheKey);
   if (cached && cached.expiresAt > providerDependencies.now()) return cached.metadata;
   const isEagle = target === "eagle";
@@ -32,6 +34,8 @@ export async function generateClipMetadata(payload, target) {
           "Eagle 标题要求：先理解标题结构，再生成适合中文收藏库检索的中英混合标题。",
           "保留仓库名、产品名、人名、品牌名，以及 skill、API、UI、GitHub 等约定俗成的专有词；普通英文名词和介绍性句子必须翻译成自然中文。",
           "不要原样照抄整段英文，不要把域名或“素材参考”塞进 titleZh；titleZh 必须包含中文，oneLine 用一句中文说明它是什么。",
+          "summary 要具体说明项目提供的核心能力、内容或方法；whySaved 要说明未来会在哪种实际工作中复用，禁止写“值得参考”“待补充”或泛泛的收藏理由。",
+          isTweet ? "这是 X 帖子：titleZh 必须把帖子的核心意思翻译成中文；summary 要拆出帖子说了什么、关键实现细节（技术、数量、状态或限制）以及实际价值，不能只写“X 素材参考”。" : "",
           "示例：orange2ai/orange-line-illustration New Yorker-style minimalist editorial illustration skill for AI agents -> orange2ai/orange-line-illustration：面向 AI Agent 的《纽约客》风格极简编辑插画 skill。"
         ].join("\n")
       : "要求：中文为主，tags 2-6 个，contentType 从 article/tool/design_reference/thought/video/tweet/portfolio/documentation/unknown 里选。",
@@ -41,6 +45,7 @@ export async function generateClipMetadata(payload, target) {
     `标题：${payload.title}`,
     `URL：${payload.url}`,
     `页面描述：${payload.pageMeta?.description || ""}`,
+    isTweet ? `X 帖子正文：${pageText || "（未采集到正文，请只根据标题翻译，不得编造细节）"}` : `正文：${pageText}`,
     `作者：${payload.pageMeta?.author || ""}`,
     `选中文字：${payload.selectedText || ""}`,
     `用户备注：${payload.userNote || ""}`
@@ -63,6 +68,14 @@ export async function generateClipMetadata(payload, target) {
       providerError: error.message
     };
   }
+}
+
+function resolveMetadataText(payload, isTweet) {
+  const text = String(payload.pageContent?.text || payload.pageContent?.markdown || "").trim();
+  if (text || !isTweet) return text.slice(0, 12000);
+  const title = String(payload.title || "").trim();
+  const quotedPost = title.match(/：\s*[“"]?\s*([\s\S]*?)\s*[”"]\s*(?:\/\s*X)?$/u)?.[1] || "";
+  return quotedPost.trim().slice(0, 12000);
 }
 
 export async function testProviderSettings(settings = {}) {

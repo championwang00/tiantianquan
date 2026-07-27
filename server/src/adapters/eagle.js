@@ -212,17 +212,20 @@ export async function confirmEagleWrite(task, options = {}) {
       throw new Error(`Eagle ${importPlanLabel(importedCandidate)} 导入后未能验证到对应条目。`);
     }
 
-    const freshItem = await waitForItemInfo(itemId);
+    let freshItem = await waitForItemInfo(itemId);
     if (importedCandidate.kind === "media-file" && freshItem?.ext && !isExpectedMediaItem(freshItem, importedCandidate, task.payload)) {
       throw new Error(`Eagle 视频导入格式不匹配：期望 mp4 媒体文件，但验证到 ${freshItem.ext || "未知格式"}。`);
     }
 
+    const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, folders, annotation);
+    if (metadataUpdate.ok) {
+      freshItem = await waitForItemInfo(itemId);
+    }
     const verification = await verifyItem(itemId, task.payload, folders, freshItem);
     if (!verification.folderOk && primaryFolder) {
       throw new Error(`Eagle 已导入但未进入目标文件夹「${primaryFolder.name}」。itemId=${itemId}，实际文件夹：${verification.rawFolderNames.join("、") || verification.rawFolderIds.join("、") || "未知"}。`);
     }
 
-    const metadataUpdate = await updateItemMetadata(itemId, task.payload, metadata, folders, annotation);
     const writtenItem = {
       candidateId: importedCandidate.id,
       requestedCandidateId: candidate.id,
@@ -242,7 +245,7 @@ export async function confirmEagleWrite(task, options = {}) {
   }, result.writePlan.candidates || candidates);
   const writtenItems = batch.items.filter((item) => item.status === "success");
 
-  if (writtenItems.length) await revealEagle();
+  if (writtenItems.length) await revealEagle(writtenItems.map((item) => item.itemId));
   return {
     ...result,
     status: batch.failed ? (batch.succeeded ? "partial_success" : "failed") : "success",
@@ -264,6 +267,10 @@ export async function confirmEagleWrite(task, options = {}) {
 }
 
 export const __testHooks = {
+  buildAnnotation,
+  buildEagleBody,
+  buildEagleItemLink,
+  buildItemUpdateBody,
   buildImportCandidates,
   instagramEntryMatchesCandidate,
   importWithFallback,
@@ -1036,17 +1043,12 @@ function extensionFromUrl(assetUrl) {
 }
 
 async function importPathToEagle(filePath, payload, metadata, folders, annotation) {
-  const website = normalizeWebsite(payload.url);
-  return request("/api/item/addFromPath", {
+  return request("/api/item/addFromURL", {
     method: "POST",
-    body: {
-      path: filePath,
-      name: buildName(payload, metadata),
-      website,
-      annotation: trimField(annotation, 1800),
-      tags: buildTags(payload, folders, metadata),
-      folderIds: folders.map((folder) => folder.id).filter(Boolean)
-    }
+    body: buildEagleBody(payload, metadata, folders, annotation, {
+      url: pathToFileUrl(filePath),
+      website: normalizeWebsite(payload.url)
+    })
   });
 }
 
@@ -1472,17 +1474,25 @@ async function updateItemMetadata(itemId, payload, metadata, folders, annotation
   try {
     await request("/api/item/update", {
       method: "POST",
-      body: {
-        id: itemId,
-        annotation: trimField(annotation, 1800),
-        tags: buildTags(payload, folders, metadata),
-        url: normalizeWebsite(payload.url)
-      }
+      body: buildItemUpdateBody(itemId, payload, metadata, folders, annotation)
     });
     return { ok: true };
   } catch (error) {
     return { ok: false, reason: error.message };
   }
+}
+
+function buildItemUpdateBody(itemId, payload, metadata, folders, annotation) {
+  return {
+    id: itemId,
+    annotation: trimField(annotation, 1800),
+    tags: buildTags(payload, folders, metadata),
+    url: normalizeWebsite(payload.url)
+  };
+}
+
+function pathToFileUrl(filePath) {
+  return new URL(`file://${encodeURI(path.resolve(filePath))}`).toString();
 }
 
 async function fileSize(filePath) {
@@ -1520,11 +1530,32 @@ function buildName(payload, metadata) {
 }
 
 function buildAnnotation(payload, metadata) {
+  const summary = String(metadata.summary || buildChineseSummary(payload)).trim();
+  const whySaved = String(metadata.whySaved || "").trim();
+  const usefulWhySaved = whySaved && !/^(?:待补充(?:保存原因)?|作为网页、产品、设计或内容参考)[。.]?$/u.test(whySaved)
+    ? whySaved
+    : "";
+  const useCase = inferUseCase(payload, metadata);
   return [
-    metadata.summary || buildChineseSummary(payload),
-    `保存价值：${metadata.whySaved || "作为网页、产品、设计或内容参考。"}`,
-    "Router 记录：由 Chaopi Link Router 自动入库。"
-  ].join("\n");
+    summary ? `- 核心内容：${summary}` : "",
+    useCase ? `- 适用场景：${useCase}` : "",
+    usefulWhySaved ? `- 保存价值：${usefulWhySaved}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function inferUseCase(payload, metadata) {
+  const text = [payload.title, payload.pageMeta?.description, metadata.summary, metadata.contentType, ...(metadata.tags || [])]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (/ai|claude|cursor|codex|copilot|agent|技能|skill/.test(text) && /动效|motion|transition|动画|交互/.test(text)) {
+    return "AI 编程、产品动效与交互设计参考。";
+  }
+  if (/动效|motion|transition|动画/.test(text)) return "网页动效与交互实现参考。";
+  if (/ui|ux|界面|交互/.test(text)) return "界面与交互设计参考。";
+  if (/前端|javascript|react|vue|css|代码|开发/.test(text)) return "前端开发与实现参考。";
+  if (/品牌|logo|identity|标志/.test(text)) return "品牌与视觉设计参考。";
+  return "";
 }
 
 function buildTags(payload, folders, metadata) {
@@ -1543,7 +1574,17 @@ async function saveHtmlSnapshot(html, title) {
   return { filePath, filename, source: "html-snapshot" };
 }
 
-async function revealEagle() {
+function buildEagleItemLink(itemId) {
+  const id = String(itemId || "").trim();
+  return id ? `eagle://item/${encodeURIComponent(id)}` : "";
+}
+
+async function revealEagle(itemIds = []) {
+  const itemLink = buildEagleItemLink(itemIds[0]);
+  if (itemLink) {
+    const opened = await execFileAsync("open", [itemLink], { timeout: 5000 }).then(() => true).catch(() => false);
+    if (opened) return;
+  }
   await execFileAsync("open", ["-a", "Eagle"], { timeout: 5000 }).catch(() => {});
 }
 

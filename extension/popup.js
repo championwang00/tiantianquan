@@ -356,8 +356,9 @@ async function collectPageContext(tab, options = {}) {
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
-        const article = findReadableRoot(mainTweetRoot);
-        const structuredArticle = mainTweetRoot || findArticleRoot();
+        const weChatRoot = findWeChatArticleRoot();
+        const article = findReadableRoot(mainTweetRoot || weChatRoot);
+        const structuredArticle = mainTweetRoot || weChatRoot || findArticleRoot();
         const visibleText = getVisibleText(article);
         const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 30 : 6);
         const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 20) : [];
@@ -398,8 +399,10 @@ async function collectPageContext(tab, options = {}) {
           if (scopeRoot) return scopeRoot;
           const socialRoot = findSocialContentRoot();
           if (socialRoot) return socialRoot;
+          const weChatRoot = findWeChatArticleRoot();
+          if (weChatRoot) return weChatRoot;
           const candidates = [
-            ...document.querySelectorAll("article, main, [role='main'], .article, .post, .entry-content, .markdown-body, .content")
+            ...document.querySelectorAll("#js_content, .rich_media_content, article, main, [role='main'], .article, .post, .entry-content, .markdown-body, .content")
           ].filter(Boolean);
           return candidates
             .map((node) => ({ node, score: readableScore(node) }))
@@ -407,7 +410,8 @@ async function collectPageContext(tab, options = {}) {
         }
 
         function findArticleRoot() {
-          const preferred = document.querySelector("article")
+          const preferred = findWeChatArticleRoot()
+            || document.querySelector("article")
             || document.querySelector("[role='main'] article")
             || document.querySelector("main");
           if (preferred) return preferred;
@@ -428,6 +432,13 @@ async function collectPageContext(tab, options = {}) {
             }
           }
           return bestNode || document.body;
+        }
+
+        function findWeChatArticleRoot() {
+          if (!/(^|\.)mp\.weixin\.qq\.com$/.test(location.hostname)) return null;
+          return document.querySelector("#js_content")
+            || document.querySelector(".rich_media_content")
+            || document.querySelector("#js_article");
         }
 
         function findSocialContentRoot(scopeRoot = document) {
@@ -531,10 +542,10 @@ async function collectPageContext(tab, options = {}) {
             const srcset = image.getAttribute("srcset") || image.getAttribute("data-srcset") || "";
             const fromSrcset = pickLargestSrcset(srcset);
             push(
-              fromSrcset || image.currentSrc || image.getAttribute("data-src") || image.getAttribute("data-original") || image.src,
+              imageSource(image, fromSrcset),
               image.alt || "",
-              image.naturalWidth || image.width || 0,
-              image.naturalHeight || image.height || 0,
+              imageWidth(image),
+              imageHeight(image),
               tweetScopeForImage(image, scopeRoot)
             );
           }
@@ -550,6 +561,34 @@ async function collectPageContext(tab, options = {}) {
           return items
             .filter((image) => image.width >= 180 || image.height >= 180 || /pbs\.twimg\.com\/media|xiaohongshu|xhscdn|sns-webpic|sns-img/i.test(image.src))
             .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+        }
+
+        function imageSource(image, fromSrcset = "") {
+          return fromSrcset
+            || image.currentSrc
+            || image.getAttribute("data-src")
+            || image.getAttribute("data-original")
+            || image.getAttribute("data-croporisrc")
+            || image.getAttribute("data-backsrc")
+            || image.getAttribute("data-url")
+            || image.src;
+        }
+
+        function imageWidth(image) {
+          return image.naturalWidth
+            || image.width
+            || Number(image.getAttribute("data-w") || image.getAttribute("width") || 0)
+            || 0;
+        }
+
+        function imageHeight(image) {
+          const width = imageWidth(image);
+          const ratio = Number(image.getAttribute("data-ratio") || 0);
+          return image.naturalHeight
+            || image.height
+            || Number(image.getAttribute("height") || 0)
+            || (width && ratio ? Math.round(width * ratio) : 0)
+            || 0;
         }
 
         function tweetScopeForImage(node, scopeRoot = null) {
@@ -718,7 +757,7 @@ async function collectPageContext(tab, options = {}) {
         function pickLargestSrcset(srcset) {
           if (!srcset) return "";
           return srcset
-            .split(",")
+            .split(/,\s+/)
             .map((part) => {
               const [src, size] = part.trim().split(/\s+/);
               const weight = Number(String(size || "").replace(/[^\d.]/g, "")) || 0;
@@ -759,8 +798,8 @@ async function collectPageContext(tab, options = {}) {
             return;
           }
           if (tag === "img") {
-            const src = node.currentSrc || node.src;
-            if (src && (node.naturalWidth || node.width || 0) >= 160) pushUnique(blocks, seen, `![${node.alt || ""}](${src})`);
+            const src = imageSource(node, pickLargestSrcset(node.getAttribute("srcset") || node.getAttribute("data-srcset") || ""));
+            if (src && imageWidth(node) >= 160) pushUnique(blocks, seen, `![${node.alt || ""}](${src})`);
             return;
           }
           if (tag === "li" && text) {
@@ -789,7 +828,7 @@ async function collectPageContext(tab, options = {}) {
                 const text = child.innerText?.trim() || child.href;
                 pieces.push(child.href ? `[${text}](${child.href})` : text);
               } else if (tag === "img") {
-                const src = child.currentSrc || child.src;
+                const src = imageSource(child, pickLargestSrcset(child.getAttribute("srcset") || child.getAttribute("data-srcset") || ""));
                 if (src) pieces.push(`![${child.alt || ""}](${src})`);
               } else {
                 pieces.push(child.innerText || "");

@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import vm from "node:vm";
 import test from "node:test";
-import { __testHooks } from "../src/adapters/eagle.js";
+import { __testHooks, confirmEagleWrite } from "../src/adapters/eagle.js";
 
 test("prefers the visible screenshot for X posts when Eagle is in screenshot mode", async () => {
   const candidates = await __testHooks.buildImportCandidates({
@@ -92,6 +92,91 @@ test("imports selected candidates in canonical order and continues after one fai
   assert.match(result.items[1].reason, /second exploded/);
 });
 
+test("metadata update reapplies selected Eagle folders after import", () => {
+  const body = __testHooks.buildItemUpdateBody(
+    "item-1",
+    { url: "https://example.com/path?utm_source=noise&ref=sidebar" },
+    { tags: ["Design"] },
+    [{ id: "folder-a", name: "Design" }, { id: "folder-b", name: "Components" }],
+    "annotation"
+  );
+
+  assert.equal("folders" in body, false);
+  assert.deepEqual(body.tags, ["网页收藏", "Design", "Components"]);
+  assert.equal(body.url, "https://example.com/path?ref=sidebar");
+});
+
+test("Eagle URL imports keep every selected folder id", () => {
+  const body = __testHooks.buildEagleBody(
+    { url: "https://example.com/article" },
+    { titleZh: "Article", oneLine: "Reference", tags: [] },
+    [{ id: "folder-a", name: "A" }, { id: "folder-b", name: "B" }],
+    "annotation",
+    { url: "file:///tmp/capture.png", website: "https://example.com/article" }
+  );
+
+  assert.deepEqual(body.folderIds, ["folder-a", "folder-b"]);
+  assert.equal("folderId" in body, false);
+  assert.equal(body.website, "https://example.com/article");
+});
+
+test("Eagle annotation keeps useful project value and omits router boilerplate", () => {
+  const annotation = __testHooks.buildAnnotation({}, {
+    summary: "包含网页应用中最基本的过渡效果，可直接复制粘贴到任何项目中。",
+    whySaved: "可作为网页动效实现时的轻量代码参考。"
+  });
+
+  assert.equal(annotation, [
+    "- 核心内容：包含网页应用中最基本的过渡效果，可直接复制粘贴到任何项目中。",
+    "- 保存价值：可作为网页动效实现时的轻量代码参考。"
+  ].join("\n"));
+  assert.doesNotMatch(annotation, /Router 记录|待补充/);
+});
+
+test("Eagle annotation falls back to the summary instead of a placeholder reason", () => {
+  const annotation = __testHooks.buildAnnotation({}, {
+    summary: "可复制的网页过渡效果代码合集。",
+    whySaved: "待补充保存原因。"
+  });
+
+  assert.equal(annotation, [
+    "- 核心内容：可复制的网页过渡效果代码合集。",
+    "- 适用场景：前端开发与实现参考。"
+  ].join("\n"));
+});
+
+test("Eagle annotation omits the generic fallback reason", () => {
+  const annotation = __testHooks.buildAnnotation({}, {
+    summary: "可复制的网页过渡效果代码合集。",
+    whySaved: "作为网页、产品、设计或内容参考。"
+  });
+
+  assert.equal(annotation, [
+    "- 核心内容：可复制的网页过渡效果代码合集。",
+    "- 适用场景：前端开发与实现参考。"
+  ].join("\n"));
+});
+
+test("Eagle annotation adds a concise use case when it can infer one", () => {
+  const annotation = __testHooks.buildAnnotation({
+    title: "Transitions.dev Skill",
+    pageMeta: { description: "A skill that teaches AI about product motion." }
+  }, {
+    summary: "教会 AI 理解产品动效与过渡效果的技能包。",
+    whySaved: "用于为 AI 编程工具补充动效设计规范。",
+    contentType: "tool"
+  });
+
+  assert.match(annotation, /- 核心内容：教会 AI 理解产品动效与过渡效果的技能包。/);
+  assert.match(annotation, /- 适用场景：AI 编程、产品动效与交互设计参考。/);
+  assert.match(annotation, /- 保存价值：用于为 AI 编程工具补充动效设计规范。/);
+});
+
+test("builds an Eagle item deep link for the imported item", () => {
+  assert.equal(__testHooks.buildEagleItemLink("item-123"), "eagle://item/item-123");
+  assert.equal(__testHooks.buildEagleItemLink(""), "");
+});
+
 test("legacy single candidateId resolves as a one-element selection", () => {
   const candidates = [{ id: "first" }, { id: "second" }, { id: "third" }];
   assert.deepEqual(
@@ -143,6 +228,88 @@ test("batch defers and deduplicates owned temp cleanup until every candidate is 
   assert.deepEqual(observed, [["first", true], ["second", true]]);
   assert.equal(fs.existsSync(shared), false);
 });
+
+test("confirm updates Eagle item folders before final folder verification", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalOpen = process.env.PATH;
+  const requests = [];
+  const items = new Map();
+  const candidate = {
+    id: "page-url",
+    kind: "url",
+    sourceType: "website",
+    selected: true
+  };
+  const folder = { id: "folder-a", name: "Design" };
+  const task = {
+    payload: {
+      url: "https://example.com/gallery",
+      title: "Gallery",
+      options: { eagle: { folderIds: [folder.id], captureMode: "url" } },
+      pageMeta: {},
+      pageAssets: {},
+      pageContent: {}
+    },
+    results: {
+      eagle: {
+        writePlan: {
+          folders: [folder],
+          metadata: { titleZh: "Gallery", oneLine: "Reference", tags: [] },
+          annotation: "annotation",
+          importPlan: candidate,
+          candidates: [candidate]
+        }
+      }
+    }
+  };
+
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ path: parsed.pathname, body });
+    if (parsed.pathname === "/api/application/info") return jsonResponse({ status: "success", data: {} });
+    if (parsed.pathname === "/api/folder/list") return jsonResponse({ status: "success", data: [folder] });
+    if (parsed.pathname === "/api/item/list") return jsonResponse({ status: "success", data: [...items.values()] });
+    if (parsed.pathname === "/api/item/addFromURL") {
+      const item = {
+        id: "item-1",
+        name: body.name,
+        url: body.url,
+        website: body.website,
+        folders: body.folderIds || []
+      };
+      items.set(item.id, item);
+      return jsonResponse({ status: "success", data: { id: item.id } });
+    }
+    if (parsed.pathname === "/api/item/info") {
+      const item = items.get(parsed.searchParams.get("id"));
+      return jsonResponse({ status: "success", data: item || { id: parsed.searchParams.get("id") } });
+    }
+    if (parsed.pathname === "/api/item/update") {
+      const current = items.get(body.id);
+      items.set(body.id, { ...current, ...body });
+      return jsonResponse({ status: "success", data: items.get(body.id) });
+    }
+    return jsonResponse({ status: "success", data: {} });
+  };
+
+  try {
+    const result = await confirmEagleWrite(task, { folderIds: [folder.id], candidateIds: [candidate.id] });
+    assert.equal(result.status, "success");
+    assert.deepEqual(items.get("item-1").folders, [folder.id]);
+    assert.ok(requests.find((request) => request.path === "/api/item/update"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.PATH = originalOpen;
+  }
+});
+
+function jsonResponse(body) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
 
 test("preserves Instagram carousel order, deduplicates media, and includes carousel metadata", async () => {
   const candidates = await __testHooks.buildImportCandidates({
@@ -389,6 +556,15 @@ test("background and popup mark X primary tweet images for media grids", () => {
     assert.match(source, /tweetScope: scope/);
     assert.match(source, /parsed\.hostname === "pbs\.twimg\.com"/);
     assert.match(source, /parsed\.searchParams\.set\("name", "orig"\)/);
+  }
+});
+
+test("background and popup preserve commas inside CDN srcset URLs", () => {
+  for (const relative of ["../../extension/background.js", "../../extension/popup.js"]) {
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, relative), "utf8");
+    const helper = source.match(/function pickLargestSrcset\(srcset\) \{[\s\S]*?\n        \}/)?.[0] || "";
+    assert.match(helper, /\.split\(\/,\\s\+\/\)/);
+    assert.doesNotMatch(helper, /\.split\(","\)/);
   }
 });
 

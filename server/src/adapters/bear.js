@@ -7,7 +7,6 @@ import { generateClipMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { hostnameFromUrl } from "../utils/webpage.js";
 import { loadEnv } from "../utils/env.js";
-import { articleHtmlToMarkdown } from "../utils/article.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BEAR_NOTE_ID = "";
@@ -23,7 +22,6 @@ const defaultBearDependencies = {
   convertVideo: convertVideoToGif,
   append: appendToBear,
   addFile: addFileToBear,
-  indent: indentBearImageLine,
   verify: verifyBearUrl,
   cleanup: cleanupOwnedPaths,
   wait
@@ -41,6 +39,7 @@ export function __resetBearTestHooks() {
 export const __testBuildBearDraftParts = buildBearDraftParts;
 export const __testBuildBearCandidates = buildBearCandidates;
 export const __testResolveBearCandidateAsset = resolveBearCandidateAsset;
+export const __testBuildBearXCallbackUrl = buildBearXCallbackUrl;
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
@@ -81,23 +80,15 @@ async function confirmBearWriteInner(task, options) {
   const resolution = includeScreenshot ? await resolveSelectedBearAssets(task, options) : { assets: [], items: [] };
   const selectedAssets = resolution.assets;
   try {
-  const draft = includeScreenshot
-    ? buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets).full
-    : (result.draftNoScreenshot || buildBearDraftParts(task.payload, result.metadata || {}, null).full);
+  const draft = buildBearDraftParts(task.payload, result.metadata || {}, null).full;
+  await bearDependencies.append(draft);
   if (includeScreenshot && selectedAssets.length) {
-    const draftParts = buildBearDraftParts(task.payload, result.metadata || {}, selectedAssets);
-    await bearDependencies.append(draftParts.beforeImage);
     for (const asset of selectedAssets) {
       const item = resolution.items.find((entry) => entry.asset === asset);
       try {
         await bearDependencies.addFile(asset.filePath, asset.filename);
         if (item) item.status = "success";
         await bearDependencies.wait(900);
-        try {
-          await bearDependencies.indent(asset.filename);
-        } catch (error) {
-          if (item) item.warnings = [...(item.warnings || []), { stage: "indent", error: error.message }];
-        }
       } catch (error) {
         if (item) {
           item.status = "failed";
@@ -105,9 +96,6 @@ async function confirmBearWriteInner(task, options) {
         }
       }
     }
-    await bearDependencies.append(draftParts.afterImage);
-  } else {
-    await bearDependencies.append(draft);
   }
   await bearDependencies.wait(1800);
   const successfulAssets = resolution.items.filter((item) => item.status === "success").map((item) => item.asset);
@@ -159,18 +147,10 @@ function buildBearDraft(payload, metadata, screenshot) {
 
 function buildBearDraftParts(payload, metadata, visualAsset) {
   const title = buildTitle(payload, metadata);
-  const summary = escapeBearText(metadata.summary || "待补充摘要。");
   const beforeImage = `* **${title}**`;
-  const article = isInstagramUrl(payload.url)
-    ? ""
-    : (payload.pageContent?.articleHtml
-      ? articleHtmlToMarkdown(payload.pageContent.articleHtml, payload.url)
-      : String(payload.pageContent?.markdown || "").trim());
-  const description = escapeBearText(payload.pageMeta?.description || payload.description || "");
+  const description = escapeBearText(metadata.summary || payload.pageMeta?.description || payload.description || "");
   const afterImage = [
-    article ? indentDraftBlock(article) : "",
     description ? `  * ${description}` : "",
-    `  * ${summary}`,
     `  * ${payload.url}`
   ].filter(Boolean).join("\n");
   const assets = Array.isArray(visualAsset) ? visualAsset : [visualAsset].filter(Boolean);
@@ -192,10 +172,6 @@ function buildBearDraftParts(payload, metadata, visualAsset) {
       afterImage
     ].join("\n")
   };
-}
-
-function indentDraftBlock(markdown) {
-  return String(markdown).split(/\r?\n/).map((line) => line ? `  ${line}` : "  ").join("\n");
 }
 
 function buildTitle(payload, metadata) {
@@ -513,57 +489,37 @@ function isInstagramUrl(value) {
 }
 
 async function appendToBear(markdown) {
-  const noteId = getBearNoteId();
-  const callback = new URL("bear://x-callback-url/add-text");
-  const url = [
-    callback.toString(),
-    `?id=${encodeURIComponent(noteId)}`,
-    "&mode=append",
-    `&text=${encodeURIComponent(`\n${markdown}\n`)}`
-  ].join("");
+  const url = buildBearXCallbackUrl("add-text", {
+    id: getBearNoteId(),
+    mode: "append",
+    text: `\n${markdown}\n`,
+    open_note: "yes",
+    show_window: "yes",
+    edit: "yes"
+  });
   await openBearUrl(url, 5000);
-  await revealBear();
 }
 
 async function addFileToBear(filePath, filename) {
-  const noteId = getBearNoteId();
   const base64 = await fs.readFile(filePath, "base64");
-  const callback = new URL("bear://x-callback-url/add-file");
-  const url = [
-    callback.toString(),
-    `?id=${encodeURIComponent(noteId)}`,
-    "&mode=append",
-    `&file=${encodeURIComponent(base64)}`,
-    `&filename=${encodeURIComponent(filename)}`
-  ].join("");
+  const url = buildBearXCallbackUrl("add-file", {
+    id: getBearNoteId(),
+    mode: "append",
+    file: base64,
+    filename,
+    open_note: "yes",
+    show_window: "yes",
+    edit: "yes"
+  });
   await openBearUrl(url, 8000);
 }
 
-async function indentBearImageLine(filename) {
-  const noteText = await readBearNoteText();
-  const normalized = noteText
-    .split(/\r?\n/)
-    .map((line) => {
-      if (line.includes(`](${filename})`) && !line.trimStart().startsWith("*")) {
-        return `  * ${line.trim()}`;
-      }
-      return line;
-    })
-    .join("\n");
-  if (normalized !== noteText) await replaceBearText(normalized);
-}
-
-async function replaceBearText(markdown) {
-  const noteId = getBearNoteId();
-  const callback = new URL("bear://x-callback-url/add-text");
-  const url = [
-    callback.toString(),
-    `?id=${encodeURIComponent(noteId)}`,
-    "&mode=replace_all",
-    `&text=${encodeURIComponent(markdown)}`
-  ].join("");
-  await openBearUrl(url, 8000);
-  await revealBear();
+function buildBearXCallbackUrl(action, params = {}) {
+  const query = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+    .join("&");
+  return `bear://x-callback-url/${encodeURIComponent(action)}${query ? `?${query}` : ""}`;
 }
 
 async function openBearUrl(url, timeout) {

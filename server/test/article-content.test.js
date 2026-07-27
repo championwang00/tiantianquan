@@ -128,6 +128,53 @@ test("converts lazy and responsive article images for Obsidian localization", ()
   assert.doesNotMatch(markdown, /placeholder\.gif/);
 });
 
+test("preserves commas inside Substack CDN srcset URLs", () => {
+  const small = "https://substackcdn.com/image/fetch/$s_!QxIf!,w_424,c_limit,f_auto,q_auto:good/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fexample.jpeg";
+  const large = "https://substackcdn.com/image/fetch/$s_!QxIf!,w_1456,c_limit,f_auto,q_auto:good/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fexample.jpeg";
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <img src="${large}" srcset="${small} 424w, ${large} 1456w" alt="Substack image">
+    </article>`, "https://syntaxstream.substack.com/p/example");
+
+  assert.equal(markdown, `![Substack image](${large})`);
+});
+
+test("does not wrap article images in their source-page jump links", () => {
+  const image = "https://substackcdn.com/image/fetch/example/image.jpeg";
+  const markdown = articleHtmlToMarkdown(`
+    <article>
+      <a href="${image}"><img src="${image}" alt="Diagram"></a>
+    </article>`, "https://syntaxstream.substack.com/p/example");
+
+  assert.equal(markdown, `![Diagram](${image})`);
+});
+
+test("converts WeChat lazy images inside preview links to markdown images", () => {
+  const markdown = articleHtmlToMarkdown(`
+    <div id="js_content">
+      <p>公众号正文</p>
+      <p>
+        <a href="https://mp.weixin.qq.com/s/preview-jump">
+          <img
+            class="rich_pages wxw-img"
+            data-src="https://mmbiz.qpic.cn/mmbiz_png/example/640?wx_fmt=png&amp;from=appmsg"
+            data-croporisrc="https://mmbiz.qpic.cn/mmbiz_png/example/original?wx_fmt=png"
+            src="data:image/gif;base64,R0lGODlhAQABAAAAACw="
+            alt="流程图">
+        </a>
+      </p>
+    </div>`, "https://mp.weixin.qq.com/s/SZlk8j1PVTmo9HhCzk-ZhQ");
+
+  assert.equal(markdown, [
+    "公众号正文",
+    "",
+    "![流程图](https://mmbiz.qpic.cn/mmbiz_png/example/640?wx_fmt=png&from=appmsg)"
+  ].join("\n"));
+  assert.deepEqual(extractArticleImageUrls(markdown), [
+    "https://mmbiz.qpic.cn/mmbiz_png/example/640?wx_fmt=png&from=appmsg"
+  ]);
+});
+
 test("escapes hostile markdown text and uses code delimiters longer than content", () => {
   const markdown = articleHtmlToMarkdown(`
     <article>

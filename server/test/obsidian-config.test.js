@@ -28,6 +28,25 @@ test("buildWritePlan converts article HTML before falling back to captured markd
   assert.doesNotMatch(plan.markdown, /fallback/);
 });
 
+test("buildWritePlan preserves WeChat article body and inline images", () => {
+  const image = "https://mmbiz.qpic.cn/sz_mmbiz_png/example/640?wx_fmt=png";
+  const payload = {
+    url: "https://mp.weixin.qq.com/s/SZlk8j1PVTmo9HhCzk-ZhQ",
+    capturedAt: "2026-07-15T00:00:00Z",
+    pageMeta: {},
+    pageContent: {
+      articleHtml: `<div id="js_content"><p>公众号正文</p><a href="https://mp.weixin.qq.com/s/jump"><img data-src="${image}" data-w="1080"></a></div>`,
+      markdown: ""
+    }
+  };
+  const metadata = { canonicalName: "WeChat", titleZh: "WeChat", author: { values: [] }, summary: "", tags: [] };
+  const plan = buildWritePlan(payload, { vaultPath: "/vault", clipFolder: "Clippings" }, metadata);
+
+  assert.match(plan.markdown, /公众号正文/);
+  assert.match(plan.markdown, /!\[\]\(https:\/\/mmbiz\.qpic\.cn\/sz_mmbiz_png\/example\/640\?wx_fmt=png\)/);
+  assert.doesNotMatch(plan.markdown, /\[!\[\]/);
+});
+
 test("buildWritePlan embeds primary X images for Obsidian notes", () => {
   const payload = {
     url: "https://x.com/ClaudeDevs/status/2074208949205881033",

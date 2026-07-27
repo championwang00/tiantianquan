@@ -1,21 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, __testResolveBearCandidateAsset, confirmBearWrite } from "../src/adapters/bear.js";
+import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, __testBuildBearXCallbackUrl, __testResolveBearCandidateAsset, confirmBearWrite } from "../src/adapters/bear.js";
 
 test.afterEach(() => __resetBearTestHooks());
 
-test("places structured article markdown before description and summary", () => {
+test("Bear drafts omit article body and keep only Chinese description and link", () => {
   const payload = {
     url: "https://example.com/story",
     title: "Pangram",
     pageMeta: { description: "Publisher description" },
     pageContent: { articleHtml: "<article><h2>Actual body</h2><p>The quick brown fox.</p></article>" }
   };
-  const draft = __testBuildBearDraftParts(payload, { summary: "Generated summary" }, null).full;
+  const draft = __testBuildBearDraftParts(payload, { summary: "中文摘要" }, null).full;
 
-  assert.match(draft, /## Actual body/);
-  assert.ok(draft.indexOf("## Actual body") < draft.indexOf("Publisher description"));
-  assert.ok(draft.indexOf("Publisher description") < draft.indexOf("Generated summary"));
+  assert.match(draft, /Pangram/);
+  assert.match(draft, /中文摘要/);
+  assert.match(draft, /https:\/\/example\.com\/story/);
+  assert.doesNotMatch(draft, /Actual body|quick brown fox|Publisher description/);
 });
 
 test("Instagram Bear drafts omit raw remote image markdown and use native attachments", () => {
@@ -26,8 +27,41 @@ test("Instagram Bear drafts omit raw remote image markdown and use native attach
     pageContent: { markdown: "![unrelated](https://cdn.example/noise.jpg)\nOther page noise" }
   }, { summary: "AI OS concept" }, null).full;
   assert.doesNotMatch(draft, /!\[|cdn\.example|Other page noise/);
-  assert.match(draft, /243 likes/);
   assert.match(draft, /AI OS concept/);
+  assert.doesNotMatch(draft, /243 likes/);
+});
+
+test("Bear x-callback URLs request edit mode without form-style plus encoding", () => {
+  const textCallback = __testBuildBearXCallbackUrl("add-text", {
+    id: "note-id",
+    mode: "append",
+    text: "body with spaces",
+    open_note: "yes",
+    show_window: "yes",
+    edit: "yes"
+  });
+  const fileCallback = __testBuildBearXCallbackUrl("add-file", {
+    id: "note-id",
+    mode: "append",
+    file: "abc",
+    filename: "shot.jpg",
+    open_note: "yes",
+    show_window: "yes",
+    edit: "yes"
+  });
+  const textUrl = new URL(textCallback);
+  const fileUrl = new URL(fileCallback);
+
+  for (const url of [textUrl, fileUrl]) {
+    assert.equal(url.searchParams.get("id"), "note-id");
+    assert.equal(url.searchParams.get("mode"), "append");
+    assert.equal(url.searchParams.get("open_note"), "yes");
+    assert.equal(url.searchParams.get("show_window"), "yes");
+    assert.equal(url.searchParams.get("edit"), "yes");
+  }
+  assert.equal(textUrl.searchParams.get("text"), "body with spaces");
+  assert.doesNotMatch(textCallback, /\+/);
+  assert.doesNotMatch(fileCallback, /\+/);
 });
 
 test("Bear and Eagle can consume the same Instagram carousel media set", async () => {
@@ -102,7 +136,7 @@ test("materializes selected candidates in candidate order and writes all into on
     resolveCandidate: async (candidate) => ({ filePath: `/tmp/${candidate.id}`, filename: `${candidate.id}.jpg`, label: candidate.id }),
     append: async (text) => events.push(["append", text]),
     addFile: async (_path, filename) => events.push(["file", filename]),
-    indent: async () => {},
+    indent: async () => { throw new Error("must not rewrite the existing note"); },
     wait: async () => {},
     verify: async () => ({ count: 1, imageRefCount: 2 })
   });
@@ -111,7 +145,10 @@ test("materializes selected candidates in candidate order and writes all into on
   const result = await confirmBearWrite(task, { candidateIds: ["third", "first"], includeScreenshot: true });
 
   assert.deepEqual(events.filter(([kind]) => kind === "file").map(([, value]) => value), ["first.jpg", "third.jpg"]);
-  assert.equal(events.filter(([kind]) => kind === "append").length, 2);
+  assert.deepEqual(events.map(([kind]) => kind), ["append", "file", "file"]);
+  assert.match(events[0][1], /\* \*\*Story — 阅读笔记摘录\*\*/);
+  assert.match(events[0][1], /  \* Summary/);
+  assert.match(events[0][1], /https:\/\/example\.com\/story/);
   assert.equal(result.status, "success");
   assert.equal(result.succeeded, 2);
   assert.equal(result.failed, 0);
@@ -154,6 +191,32 @@ test("rejects explicit stale candidate ids instead of falling back to the first 
   assert.equal(resolved, 0);
 });
 
+test("no-screenshot confirmation rebuilds the Bear draft instead of reusing stale preview content", async () => {
+  const appended = [];
+  __setBearTestHooks({
+    append: async (text) => appended.push(text),
+    wait: async () => {},
+    verify: async () => ({ count: 1, imageRefCount: 0 })
+  });
+  const task = bearTask([]);
+  task.payload.pageContent = { articleHtml: "<article><h2>Old body</h2><p>Should not be written.</p></article>" };
+  task.payload.pageMeta = { description: "Publisher description" };
+  task.results.bear.draftNoScreenshot = [
+    "* **Old preview**",
+    "  ## Old body",
+    "  Should not be written.",
+    "  * https://example.com/story"
+  ].join("\n");
+
+  const result = await confirmBearWrite(task, { includeScreenshot: false });
+
+  assert.equal(result.status, "success");
+  assert.equal(appended.length, 1);
+  assert.match(appended[0], /Summary/);
+  assert.match(appended[0], /https:\/\/example\.com\/story/);
+  assert.doesNotMatch(appended[0], /Old body|Should not be written|Publisher description/);
+});
+
 test("reports failed when the note is saved but every selected attachment fails", async () => {
   __setBearTestHooks({
     resolveCandidate: async (entry) => ({ filePath: `/tmp/${entry.id}.jpg`, filename: `${entry.id}.jpg` }),
@@ -169,10 +232,11 @@ test("reports failed when the note is saved but every selected attachment fails"
   assert.equal(result.failed, 2);
 });
 
-test("keeps an added attachment successful when optional indentation fails", async () => {
+test("never rewrites the existing Bear note after adding an attachment", async () => {
+  let rewriteAttempts = 0;
   __setBearTestHooks({
     resolveCandidate: async (candidate) => ({ filePath: `/tmp/${candidate.id}`, filename: `${candidate.id}.jpg` }),
-    append: async () => {}, addFile: async () => {}, indent: async () => { throw new Error("format failed"); }, wait: async () => {},
+    append: async () => {}, addFile: async () => {}, indent: async () => { rewriteAttempts += 1; }, wait: async () => {},
     verify: async (_url, filenames) => ({ count: 1, imageRefCount: filenames.length })
   });
 
@@ -181,10 +245,11 @@ test("keeps an added attachment successful when optional indentation fails", asy
   assert.equal(result.succeeded, 1);
   assert.equal(result.failed, 0);
   assert.equal(result.items[0].status, "success");
-  assert.deepEqual(result.items[0].warnings, [{ stage: "indent", error: "format failed" }]);
+  assert.equal(rewriteAttempts, 0);
+  assert.equal(result.items[0].warnings, undefined);
 });
 
-test("escapes hostile metadata fields while preserving article markdown", () => {
+test("escapes hostile metadata fields while omitting article markdown", () => {
   const payload = {
     url: "https://example.com/story",
     title: "[bad](javascript:alert(1))\n# forged",
@@ -195,7 +260,7 @@ test("escapes hostile metadata fields while preserving article markdown", () => 
     label: "[label](javascript:bad)\nnext", filename: "evil]\n* file.jpg"
   }]).full;
 
-  assert.match(draft, /## Safe article\n\s+\*\*kept\*\*/);
+  assert.doesNotMatch(draft, /Safe article|kept/);
   assert.doesNotMatch(draft, /\]\(javascript:/);
   assert.doesNotMatch(draft, /\n# forged|\n\* injected|\nnext/);
   assert.match(draft, /\\\[bad\\\]/);

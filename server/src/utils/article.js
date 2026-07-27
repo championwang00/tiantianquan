@@ -24,6 +24,7 @@ export function articleHtmlToMarkdown(html, baseUrl) {
     if (tag === "CODE" && !context.inPre) return inlineCode(node.textContent.replace(/\s+/g, " ").trim());
     if (tag === "A") {
       const label = inline();
+      if (node.querySelector("img")) return label;
       const href = absoluteUrl(node.getAttribute("href"), baseUrl);
       return href ? `[${label || href}](${href})` : label;
     }
@@ -130,6 +131,8 @@ function imageSourceUrl(node, baseUrl) {
     node.getAttribute("data-image"),
     node.getAttribute("data-url"),
     node.getAttribute("data-src"),
+    node.getAttribute("data-croporisrc"),
+    node.getAttribute("data-backsrc"),
     node.getAttribute("src")
   ];
   const picture = node.closest?.("picture");
@@ -147,7 +150,7 @@ function imageSourceUrl(node, baseUrl) {
 function pickLargestSrcset(srcset) {
   if (!srcset) return "";
   return String(srcset)
-    .split(",")
+    .split(/,\s+/)
     .map((part) => {
       const [src, descriptor] = part.trim().split(/\s+/);
       const weight = Number(String(descriptor || "").replace(/[^\d.]/g, "")) || 0;
