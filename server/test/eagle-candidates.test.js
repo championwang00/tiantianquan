@@ -5,6 +5,34 @@ import os from "node:os";
 import vm from "node:vm";
 import test from "node:test";
 import { __testHooks, confirmEagleWrite } from "../src/adapters/eagle.js";
+import { __resetProviderTestHooks, __setProviderTestHooks } from "../src/utils/provider.js";
+
+test.afterEach(() => __resetProviderTestHooks());
+
+test("waits for the first Eagle translation instead of falling back before the provider timeout", async () => {
+  __setProviderTestHooks({
+    callProvider: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 8100));
+      return JSON.stringify({
+        titleZh: "首次即可得到中文标题",
+        oneLine: "首次即可得到中文描述",
+        summary: "中文摘要",
+        tags: ["测试"],
+        contentType: "article",
+        whySaved: "用于验证首次翻译"
+      });
+    }
+  });
+
+  const metadata = await __testHooks.buildEagleMetadata({
+    url: "https://example.com/english-article",
+    title: "English article title",
+    pageMeta: { description: "English article description" }
+  });
+
+  assert.equal(metadata.titleZh, "首次即可得到中文标题");
+  assert.equal(metadata.oneLine, "首次即可得到中文描述");
+});
 
 test("prefers the visible screenshot for X posts when Eagle is in screenshot mode", async () => {
   const candidates = await __testHooks.buildImportCandidates({
@@ -565,6 +593,13 @@ test("background and popup preserve commas inside CDN srcset URLs", () => {
     const helper = source.match(/function pickLargestSrcset\(srcset\) \{[\s\S]*?\n        \}/)?.[0] || "";
     assert.match(helper, /\.split\(\/,\\s\+\/\)/);
     assert.doesNotMatch(helper, /\.split\(","\)/);
+  }
+});
+
+test("background and popup read Xiaohongshu's standard video meta tag", () => {
+  for (const relative of ["../../extension/background.js", "../../extension/popup.js"]) {
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, relative), "utf8");
+    assert.match(source, /meta\[name="video"\]/);
   }
 });
 

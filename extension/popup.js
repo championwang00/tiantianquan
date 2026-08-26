@@ -67,7 +67,7 @@ async function init() {
 function bindStaticActions() {
   document.querySelector("#settingsButton")?.addEventListener("click", openSettings);
   document.querySelector("#footerSettingsButton")?.addEventListener("click", openSettings);
-  document.addEventListener("pointerdown", closeEagleFolderMenuOnOutsidePointer, true);
+  document.addEventListener("click", closeEagleFolderMenuOnOutsideClick);
 }
 
 async function openSettings() {
@@ -672,6 +672,7 @@ async function collectPageContext(tab, options = {}) {
             'meta[name="og:video"]',
             'meta[name="og:video:url"]',
             'meta[name="og:video:secure_url"]',
+            'meta[name="video"]',
             'meta[name="twitter:player:stream"]',
             'meta[name="twitter:player"]'
           ]) {
@@ -1453,11 +1454,21 @@ function renderEagleFolderMenu() {
 }
 
 function rerenderEaglePreview() {
+  if (rerenderEagleFolderEditor()) return;
   const fields = currentTasks.eagle?.results?.eagle?.previewFields;
   if (fields) setCardPreview("eagle", fields);
 }
 
-function closeEagleFolderMenuOnOutsidePointer(event) {
+function rerenderEagleFolderEditor() {
+  const editor = getCard("eagle")?.querySelector('[data-role="eagle-folder-editor"]');
+  if (!editor) return false;
+  withScrollPreserved(() => {
+    editor.replaceWith(renderEagleFolderEditor());
+  });
+  return true;
+}
+
+function closeEagleFolderMenuOnOutsideClick(event) {
   if (!eagleFolderMenuOpen) return;
   const editor = event.target?.closest?.('[data-role="eagle-folder-editor"]');
   if (editor) return;

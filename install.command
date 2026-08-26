@@ -33,6 +33,12 @@ fi
 node --check src/index.js >/dev/null
 node src/init-local.js
 
+# extension/config.js is generated per computer and must not block future pulls.
+cd "$ROOT_DIR"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git ls-files --error-unmatch extension/config.js >/dev/null 2>&1; then
+  git update-index --skip-worktree extension/config.js
+fi
+
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"

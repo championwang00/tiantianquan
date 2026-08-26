@@ -461,6 +461,7 @@ async function collectPageContextInBackground(tab, options = {}) {
             'meta[name="og:video"]',
             'meta[name="og:video:url"]',
             'meta[name="og:video:secure_url"]',
+            'meta[name="video"]',
             'meta[name="twitter:player:stream"]',
             'meta[name="twitter:player"]'
           ]) {

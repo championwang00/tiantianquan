@@ -55,11 +55,7 @@ export async function runEagleAdapter(payload) {
 async function buildEagleMetadata(payload) {
   const fallback = buildFastMetadata(payload);
   try {
-    const generated = await withTimeout(
-      generateClipMetadata(payload, "eagle"),
-      8000,
-      "Eagle metadata generation timed out"
-    );
+    const generated = await generateClipMetadata(payload, "eagle");
     return mergeMetadataWithFallback(generated, fallback, payload);
   } catch (_error) {
     return fallback;
@@ -269,6 +265,7 @@ export async function confirmEagleWrite(task, options = {}) {
 export const __testHooks = {
   buildAnnotation,
   buildEagleBody,
+  buildEagleMetadata,
   buildEagleItemLink,
   buildItemUpdateBody,
   buildImportCandidates,

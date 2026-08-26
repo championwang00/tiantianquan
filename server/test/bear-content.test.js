@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, __testBuildBearXCallbackUrl, __testResolveBearCandidateAsset, confirmBearWrite } from "../src/adapters/bear.js";
+import { __resetBearTestHooks, __setBearTestHooks, __testBuildBearCandidates, __testBuildBearDraftParts, __testBuildBearXCallbackUrl, __testIndentBearImageMarkdown, __testResolveBearCandidateAsset, confirmBearWrite } from "../src/adapters/bear.js";
 
 test.afterEach(() => __resetBearTestHooks());
 
@@ -62,6 +62,24 @@ test("Bear x-callback URLs request edit mode without form-style plus encoding", 
   assert.equal(textUrl.searchParams.get("text"), "body with spaces");
   assert.doesNotMatch(textCallback, /\+/);
   assert.doesNotMatch(fileCallback, /\+/);
+});
+
+test("Bear image indentation only changes the exact bare attachment line", () => {
+  const markdown = [
+    "* **Title**",
+    "![](clip-router-shot.jpg)",
+    "  * ![](already-indented.jpg)",
+    "text mentioning ![](clip-router-shot.jpg) stays put",
+    "  * Description with spaces"
+  ].join("\n");
+
+  assert.equal(__testIndentBearImageMarkdown(markdown, "clip-router-shot.jpg"), [
+    "* **Title**",
+    "  * ![](clip-router-shot.jpg)",
+    "  * ![](already-indented.jpg)",
+    "text mentioning ![](clip-router-shot.jpg) stays put",
+    "  * Description with spaces"
+  ].join("\n"));
 });
 
 test("Bear and Eagle can consume the same Instagram carousel media set", async () => {

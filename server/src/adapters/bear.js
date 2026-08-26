@@ -40,6 +40,7 @@ export const __testBuildBearDraftParts = buildBearDraftParts;
 export const __testBuildBearCandidates = buildBearCandidates;
 export const __testResolveBearCandidateAsset = resolveBearCandidateAsset;
 export const __testBuildBearXCallbackUrl = buildBearXCallbackUrl;
+export const __testIndentBearImageMarkdown = indentBearImageMarkdown;
 
 export async function runBearAdapter(payload) {
   const metadata = await generateClipMetadata(payload, "bear");
@@ -507,6 +508,32 @@ async function addFileToBear(filePath, filename) {
     mode: "append",
     file: base64,
     filename,
+    open_note: "yes",
+    show_window: "yes",
+    edit: "yes"
+  });
+  await openBearUrl(url, 8000);
+}
+
+async function indentBearImageLine(filename) {
+  const noteText = await readBearNoteText();
+  const normalized = indentBearImageMarkdown(noteText, filename);
+  if (normalized !== noteText) await replaceBearText(normalized);
+}
+
+function indentBearImageMarkdown(markdown, filename) {
+  const bareImage = `![](${filename})`;
+  return String(markdown || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim() === bareImage ? `  * ${bareImage}` : line)
+    .join("\n");
+}
+
+async function replaceBearText(markdown) {
+  const url = buildBearXCallbackUrl("add-text", {
+    id: getBearNoteId(),
+    mode: "replace_all",
+    text: markdown,
     open_note: "yes",
     show_window: "yes",
     edit: "yes"

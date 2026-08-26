@@ -35,6 +35,21 @@ docs/        Sync rules and operating notes
    - Load unpacked
    - Pick the `extension/` folder
 
+## Updating on another Mac
+
+After changes have been committed and pushed from the first Mac, double-click
+`update.command` on the other Mac. It safely performs a fast-forward Git pull,
+keeps that Mac's router token and local settings, updates dependencies only when
+needed, restarts the background service, verifies its health, and opens
+`chrome://extensions`.
+
+On the Chrome extensions page, click **Reload** on Chaopi Link Router. Chrome
+does not provide a safe command-line reload mechanism for private unpacked
+extensions, so this is the only manual step.
+
+The updater stops without changing anything when tracked project files contain
+uncommitted edits. Commit, stash, or discard those edits before trying again.
+
 3. Open the extension options page and configure:
 
    - Base URL

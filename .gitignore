@@ -4,3 +4,4 @@ server/.env
 .DS_Store
 .codex_*.png
 release/
+.worktrees/

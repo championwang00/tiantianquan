@@ -9,6 +9,11 @@ const popupJs = fs.readFileSync(path.join(extensionPath, "popup.js"), "utf8");
 const backgroundJs = fs.readFileSync(path.join(extensionPath, "background.js"), "utf8");
 const popupCss = fs.readFileSync(path.join(extensionPath, "popup.css"), "utf8");
 
+test("popup root and body use the same width so Chrome does not leave empty space", () => {
+  assert.match(popupCss, /html,\s*\nbody\s*\{[^}]*width:\s*480px;/s);
+  assert.doesNotMatch(popupJs, /fitStandalonePopupWidth|window\.resizeBy/);
+});
+
 test("Eagle and Bear expose media selection hosts while Obsidian stays untouched", () => {
   for (const target of ["eagle", "bear"]) {
     const card = popupHtml.match(new RegExp(`<article class="channel-card" data-target="${target}">([\\s\\S]*?)</article>`))?.[1] || "";
@@ -47,6 +52,19 @@ test("grid rerenders preserve focus only for controls in the same target panel",
   assert.match(popupJs, /dataset\.gridTarget = target/);
   assert.match(popupJs, /focus\(\{ preventScroll: true \}\)/);
   assert.match(popupJs, /restoreCandidateGridFocus\(panel, focusState\)/);
+});
+
+test("Eagle folder selection rerenders only the folder editor so the page keeps its scroll position", () => {
+  assert.match(popupJs, /function rerenderEagleFolderEditor\(\)/);
+  assert.match(popupJs, /querySelector\('\[data-role="eagle-folder-editor"\]'\)/);
+  assert.match(popupJs, /editor\.replaceWith\(renderEagleFolderEditor\(\)\)/);
+  assert.match(popupJs, /function rerenderEaglePreview\(\)\s*\{\s*if \(rerenderEagleFolderEditor\(\)\) return;/s);
+});
+
+test("Eagle save click runs before an open folder menu is closed", () => {
+  assert.match(popupJs, /document\.addEventListener\("click", closeEagleFolderMenuOnOutsideClick\);/);
+  assert.doesNotMatch(popupJs, /document\.addEventListener\("pointerdown", closeEagleFolderMenuOnOutside/);
+  assert.match(popupJs, /function closeEagleFolderMenuOnOutsideClick\(event\)/);
 });
 
 test("grid visuals are three-column, square, keyboard-visible and motion-safe", () => {
