@@ -4,7 +4,7 @@ import path from "node:path";
 import { loadEnv } from "./env.js";
 
 const OPENCLAW_CONFIG = path.join(os.homedir(), ".openclaw", "openclaw.json");
-const PROVIDER_TIMEOUT_MS = 12000;
+const PROVIDER_TIMEOUT_MS = 45000;
 const METADATA_CACHE_TTL_MS = 10 * 60 * 1000;
 const metadataCache = new Map();
 const defaultProviderDependencies = { callProvider: callConfiguredProvider, now: () => Date.now() };
@@ -35,6 +35,7 @@ export async function generateClipMetadata(payload, target) {
           "保留仓库名、产品名、人名、品牌名，以及 skill、API、UI、GitHub 等约定俗成的专有词；普通英文名词和介绍性句子必须翻译成自然中文。",
           "不要原样照抄整段英文，不要把域名或“素材参考”塞进 titleZh；titleZh 必须包含中文，oneLine 用一句中文说明它是什么。",
           "summary 要具体说明项目提供的核心能力、内容或方法；whySaved 要说明未来会在哪种实际工作中复用，禁止写“值得参考”“待补充”或泛泛的收藏理由。",
+          "只能依据已提供的正文、标题和描述整理。没有读取图片、视频或外链内容时，不得猜测其中的视觉效果、交互行为、技术栈或功能；原帖简短时就写简短、完整的摘要。",
           isTweet ? "这是 X 帖子：titleZh 必须把帖子的核心意思翻译成中文；summary 要拆出帖子说了什么、关键实现细节（技术、数量、状态或限制）以及实际价值，不能只写“X 素材参考”。" : "",
           "示例：orange2ai/orange-line-illustration New Yorker-style minimalist editorial illustration skill for AI agents -> orange2ai/orange-line-illustration：面向 AI Agent 的《纽约客》风格极简编辑插画 skill。"
         ].join("\n")
@@ -52,7 +53,7 @@ export async function generateClipMetadata(payload, target) {
   ].join("\n");
 
   try {
-    const text = await withTimeout(providerDependencies.callProvider(prompt), PROVIDER_TIMEOUT_MS, "Provider metadata generation timed out");
+    const text = await withTimeout((signal) => providerDependencies.callProvider(prompt, { signal }), PROVIDER_TIMEOUT_MS, "Provider metadata generation timed out");
     const parsed = parseJson(text);
     const metadata = sanitizeMetadata(parsed, payload);
     metadataCache.set(cacheKey, { metadata, expiresAt: providerDependencies.now() + METADATA_CACHE_TTL_MS });
@@ -91,7 +92,7 @@ export async function testProviderSettings(settings = {}) {
   if (!provider) throw new Error("请先填写 Base URL 和 Model");
   if (!provider.apiKey) throw new Error("请先填写 API Key");
   const text = await withTimeout(
-    callProvider(provider, "请只输出 JSON：{\"ok\":true}"),
+    (signal) => callProvider(provider, "请只输出 JSON：{\"ok\":true}", { signal }),
     PROVIDER_TIMEOUT_MS,
     "模型连接测试超时"
   );
@@ -111,19 +112,26 @@ function resolveTestApiKey(value, env) {
   return env.CLIP_ROUTER_LLM_API_KEY || env.CLIP_ROUTER_API_KEY || "";
 }
 
-function withTimeout(promise, ms, message) {
+function withTimeout(operation, ms, message) {
+  const controller = new AbortController();
   let timer;
   return Promise.race([
-    promise,
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })
+    operation(controller.signal),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(message);
+        controller.abort(error);
+        reject(error);
+      }, ms);
+    })
   ]).finally(() => clearTimeout(timer));
 }
 
-async function callConfiguredProvider(prompt) {
+async function callConfiguredProvider(prompt, options = {}) {
   const env = loadEnv();
   const customProvider = buildCustomProvider(env);
   if (customProvider) {
-    return callProvider(customProvider, prompt);
+    return callProvider(customProvider, prompt, options);
   }
 
   const config = JSON.parse(await fs.readFile(OPENCLAW_CONFIG, "utf8"));
@@ -138,7 +146,7 @@ async function callConfiguredProvider(prompt) {
     throw new Error(`Provider ${providerName} has no apiKey`);
   }
 
-  return callProvider({ ...provider, model, apiKey }, prompt);
+  return callProvider({ ...provider, model, apiKey }, prompt, options);
 }
 
 function buildCustomProvider(env) {
@@ -157,17 +165,17 @@ function buildCustomProvider(env) {
   };
 }
 
-async function callProvider(provider, prompt) {
+async function callProvider(provider, prompt, options = {}) {
   const model = provider.model;
   const apiKey = provider.apiKey;
   if (provider.api === "openai-responses") {
-    return callResponsesApi(provider, model, apiKey, prompt);
+    return callResponsesApi(provider, model, apiKey, prompt, options);
   }
   if (provider.api === "anthropic-messages") {
-    return callAnthropicMessagesApi(provider, model, apiKey, prompt);
+    return callAnthropicMessagesApi(provider, model, apiKey, prompt, options);
   }
 
-  return callChatCompletionsApi(provider, model, apiKey, prompt);
+  return callChatCompletionsApi(provider, model, apiKey, prompt, options);
 }
 
 function defaultModelForProvider(providerName, provider) {
@@ -180,8 +188,9 @@ function defaultModelForProvider(providerName, provider) {
   return modelIds.includes(preferred) ? preferred : modelIds.at(-1) || "deepseek-v4-flash";
 }
 
-async function callResponsesApi(provider, model, apiKey, prompt) {
+async function callResponsesApi(provider, model, apiKey, prompt, { signal } = {}) {
   const response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}/responses`, {
+    signal,
     method: "POST",
     headers: buildHeaders(provider, apiKey),
     body: JSON.stringify({
@@ -196,7 +205,7 @@ async function callResponsesApi(provider, model, apiKey, prompt) {
   return extractResponsesText(data);
 }
 
-async function callChatCompletionsApi(provider, model, apiKey, prompt) {
+async function callChatCompletionsApi(provider, model, apiKey, prompt, { signal } = {}) {
   const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const body = {
     model,
@@ -205,6 +214,7 @@ async function callChatCompletionsApi(provider, model, apiKey, prompt) {
     temperature: 0.2
   };
   let response = await fetch(url, {
+    signal,
     method: "POST",
     headers: buildHeaders(provider, apiKey),
     body: JSON.stringify(body)
@@ -214,6 +224,7 @@ async function callChatCompletionsApi(provider, model, apiKey, prompt) {
   if (!response.ok && response.status === 400) {
     delete body.response_format;
     response = await fetch(url, {
+      signal,
       method: "POST",
       headers: buildHeaders(provider, apiKey),
       body: JSON.stringify(body)
@@ -224,8 +235,9 @@ async function callChatCompletionsApi(provider, model, apiKey, prompt) {
   return data.choices?.[0]?.message?.content || "";
 }
 
-async function callAnthropicMessagesApi(provider, model, apiKey, prompt) {
+async function callAnthropicMessagesApi(provider, model, apiKey, prompt, { signal } = {}) {
   const response = await fetch(`${provider.baseUrl.replace(/\/$/, "")}/v1/messages`, {
+    signal,
     method: "POST",
     headers: buildHeaders(provider, apiKey),
     body: JSON.stringify({

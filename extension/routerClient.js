@@ -4,6 +4,23 @@ const ROUTER_ENDPOINT_FALLBACKS = [
   "http://localhost:18791"
 ];
 
+async function verifyPageCapture(tab, capture) {
+  const currentTab = await chrome.tabs.get(tab.id);
+  const normalize = (value) => {
+    const url = new URL(value);
+    url.hash = "";
+    return url.href;
+  };
+  if (!capture?.url) throw new Error("页面采集未完成，请等待页面加载后重新打开插件。");
+  if (normalize(tab.url) !== normalize(capture.url) || normalize(tab.url) !== normalize(currentTab.url)) {
+    throw new Error("采集期间页面发生变化，请在目标帖子上重新打开插件。");
+  }
+  if (currentTab.active === false) throw new Error("当前标签页已切换，请回到目标帖子后重新打开插件。");
+  if (capture.postId && capture.primaryPostId !== capture.postId) {
+    throw new Error("尚未定位到当前 X 帖子，请等待帖子加载后重新展开 Eagle。");
+  }
+}
+
 async function getRouterConfig() {
   const defaultToken = typeof DEFAULT_ROUTER_TOKEN === "string" ? DEFAULT_ROUTER_TOKEN : "";
   const config = await chrome.storage.sync.get({

@@ -100,11 +100,12 @@ async function buildPayloadForBackground(target, tab, config) {
     needsScreenshot ? captureVisibleTabInBackground(tab.windowId) : Promise.resolve(""),
     collectPageContextInBackground(tab, { fullContent: needsFullContent, deepAssets: needsDeepAssets })
   ]);
+  await verifyPageCapture(tab, pageContext.capture);
 
   return {
     source: "chrome-extension",
     url: tab.url,
-    title: tab.title || tab.url,
+    title: pageContext.capture.title || tab.title || tab.url,
     selectedText: "",
     userNote: "",
     targets: [target],
@@ -125,6 +126,7 @@ async function buildPayloadForBackground(target, tab, config) {
     pageMeta: pageContext.meta,
     pageAssets: pageContext.assets,
     pageContent: pageContext.content,
+    pageCapture: pageContext.capture,
     screenshotDataUrl,
     capturedAt: new Date().toISOString()
   };
@@ -155,29 +157,35 @@ async function collectPageContextInBackground(tab, options = {}) {
         const metaContent = (selector) => document.querySelector(selector)?.content?.trim() || "";
         const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name)?.trim() || "";
         const mainTweetRoot = findMainTweetRoot();
+        const isTweet = /(^|\.)(x|twitter)\.com$/.test(location.hostname) && /\/status\/\d+/.test(location.pathname);
+        const postId = isTweet ? location.pathname.match(/\/status\/(\d+)/)[1] : "";
         const weChatRoot = findWeChatArticleRoot();
-        const article = findReadableRoot(mainTweetRoot || weChatRoot);
-        const structuredArticle = mainTweetRoot || weChatRoot || findArticleRoot();
-        const visibleText = getVisibleText(article);
+        const article = isTweet ? mainTweetRoot?.cloneNode(true) || document.createElement("div") : findReadableRoot(weChatRoot);
+        if (isTweet) for (const quote of article.querySelectorAll('[data-testid="quoteTweet"], div[role="link"]')) quote.remove();
+        const structuredArticle = isTweet ? article : weChatRoot || findArticleRoot();
+        const visibleText = isTweet
+          ? getVisibleText(article.querySelector('[data-testid="tweetText"]'))
+          : getVisibleText(article);
         const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 20 : 6);
         const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 10) : [];
         const videoRects = deepAssets ? collectVideoRects(mainTweetRoot).slice(0, 5) : [];
         const carousel = deepAssets ? await collectInstagramCarousel() : [];
         const content = fullContent
           ? {
-              text: (visibleText || getVisibleText(document.body)).slice(0, 60000),
+              text: (isTweet ? visibleText : visibleText || getVisibleText(document.body)).slice(0, 60000),
               markdown: nodeToMarkdown(article).replace(/\n{3,}/g, "\n\n").trim().slice(0, 80000),
               articleHtml: structuredArticle?.outerHTML?.slice(0, 240000) || "",
               htmlSnapshot: `<!doctype html>\n${document.documentElement.outerHTML}`.slice(0, 240000)
             }
-          : { text: "", markdown: "", articleHtml: "", htmlSnapshot: "" };
+          : { text: visibleText.slice(0, 12000), markdown: "", articleHtml: "", htmlSnapshot: "" };
         return {
+          capture: { url: location.href, title: isTweet ? visibleText || "X 帖子" : document.title, postId, primaryPostId: mainTweetRoot ? postId : "" },
           meta: {
-            description: metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
-            author: metaContent('meta[name="author"]') || metaContent('meta[property="article:author"]'),
+            description: isTweet ? visibleText : metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
+            author: isTweet ? getVisibleText(mainTweetRoot?.querySelector('[data-testid="User-Name"]')) : metaContent('meta[name="author"]') || metaContent('meta[property="article:author"]'),
             siteName: metaContent('meta[property="og:site_name"]'),
-            image: normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')),
-            canonical: attr('link[rel="canonical"]', "href"),
+            image: isTweet ? "" : normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')),
+            canonical: isTweet ? location.href : attr('link[rel="canonical"]', "href"),
             published: metaContent('meta[property="article:published_time"]') || metaContent('meta[name="article:published_time"]')
           },
           assets: {
@@ -276,13 +284,21 @@ async function collectPageContextInBackground(tab, options = {}) {
           const byStatusLink = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
             .some((link) => {
               try {
-                return new URL(link.href, location.href).pathname.includes(`/status/${statusId}`);
+                if (!isPrimaryTweetNode(link, article)) return false;
+                if (article.querySelector("time") && !link.querySelector("time")) return false;
+                return new URL(link.href, location.href).pathname.match(/\/status\/(\d+)/)?.[1] === statusId;
               } catch (_error) {
                 return false;
               }
             }));
           if (byStatusLink) return byStatusLink;
-          return articles.find((article) => article.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], video, img[src*="pbs.twimg.com/media"]')) || null;
+          return null;
+        }
+
+        function isPrimaryTweetNode(node, root) {
+          if (!root || node.closest("article") !== root) return false;
+          const quote = node.closest('[data-testid="quoteTweet"], div[role="link"]');
+          return !quote || !root.contains(quote);
         }
 
         async function collectInstagramCarousel() {
@@ -341,6 +357,7 @@ async function collectPageContextInBackground(tab, options = {}) {
         }
 
         function collectImages(deep, scopeRoot = null) {
+          if (isTweet && !scopeRoot) return [];
           const seen = new Set();
           const items = [];
           const push = (src, alt = "", width = 0, height = 0, scope = "") => {
@@ -349,10 +366,10 @@ async function collectPageContextInBackground(tab, options = {}) {
             if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
             if (isXDefaultOgImage(normalized)) return;
             seen.add(normalized);
-            items.push({ src: normalized, alt, width, height, tweetScope: scope });
+            items.push({ src: normalized, alt, width, height, tweetScope: scope, sourcePostId: scope === "primary" ? postId : "" });
           };
 
-          const imageNodes = scopeRoot ? [...scopeRoot.querySelectorAll("img")].filter((image) => image.closest("article") === scopeRoot) : [...document.images];
+          const imageNodes = scopeRoot ? [...scopeRoot.querySelectorAll("img")].filter((image) => isPrimaryTweetNode(image, scopeRoot)) : [...document.images];
           const documentImages = deep ? imageNodes : imageNodes.slice(0, 80);
           for (const image of documentImages) {
             const srcset = image.getAttribute("srcset") || image.getAttribute("data-srcset") || "";
@@ -369,6 +386,7 @@ async function collectPageContextInBackground(tab, options = {}) {
           if (deep) {
             const styledNodes = scopeRoot ? [...scopeRoot.querySelectorAll("[style]")] : [...document.querySelectorAll("[style]")];
             for (const node of styledNodes) {
+              if (scopeRoot && !isPrimaryTweetNode(node, scopeRoot)) continue;
               const match = String(node.getAttribute("style") || "").match(/url\((['"]?)(.*?)\1\)/);
               if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0, tweetScopeForImage(node, scopeRoot));
             }
@@ -409,7 +427,7 @@ async function collectPageContextInBackground(tab, options = {}) {
 
         function tweetScopeForImage(node, scopeRoot = null) {
           if (!scopeRoot) return "";
-          return node.closest("article") === scopeRoot ? "primary" : "";
+          return isPrimaryTweetNode(node, scopeRoot) ? "primary" : "";
         }
 
         function normalizeImageAssetUrl(src) {
@@ -435,6 +453,7 @@ async function collectPageContextInBackground(tab, options = {}) {
         }
 
         function collectVideos(scopeRoot = null) {
+          if (isTweet && !scopeRoot) return [];
           const seen = new Set();
           const items = [];
           const push = (src, label = "", poster = "") => {
@@ -443,10 +462,10 @@ async function collectPageContextInBackground(tab, options = {}) {
             if (normalized.startsWith("data:") || normalized.startsWith("blob:")) return;
             if (!isLikelyVideoUrl(normalized)) return;
             seen.add(normalized);
-            items.push({ src: normalized, label, poster: normalizeMetaImage(poster || "") });
+            items.push({ src: normalized, label, poster: normalizeMetaImage(poster || ""), tweetScope: scopeRoot ? "primary" : "", sourcePostId: scopeRoot ? postId : "" });
           };
 
-          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => video.closest("article") === scopeRoot) : [...document.querySelectorAll("video")];
+          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => isPrimaryTweetNode(video, scopeRoot)) : [...document.querySelectorAll("video")];
           for (const video of videoNodes) {
             push(video.currentSrc || video.src, video.getAttribute("aria-label") || video.title || "页面视频", video.poster || "");
             for (const source of [...video.querySelectorAll("source")]) {
@@ -480,7 +499,8 @@ async function collectPageContextInBackground(tab, options = {}) {
         }
 
         function collectVideoRects(scopeRoot = null) {
-          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => video.closest("article") === scopeRoot) : [...document.querySelectorAll("video")];
+          if (isTweet && !scopeRoot) return [];
+          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => isPrimaryTweetNode(video, scopeRoot)) : [...document.querySelectorAll("video")];
           return videoNodes
             .map((video, index) => {
               const rect = video.getBoundingClientRect();
@@ -491,6 +511,9 @@ async function collectPageContextInBackground(tab, options = {}) {
               const width = Math.max(0, right - left);
               const height = Math.max(0, bottom - top);
               return {
+                tweetScope: scopeRoot ? "primary" : "",
+                sourcePostId: scopeRoot ? postId : "",
+                poster: video.poster || "",
                 x: left,
                 y: top,
                 width,
@@ -647,7 +670,7 @@ function isRichMediaUrl(url) {
 }
 
 async function pollTaskInBackground(taskId, target, tab, attempt = 0) {
-  if (!taskId || attempt > 50) return;
+  if (!taskId || attempt > 75) return;
   await new Promise((resolve) => setTimeout(resolve, attempt < 2 ? 300 : attempt < 8 ? 800 : 1500));
   const task = await getTask(taskId);
   if (!task) return;

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { generateClipMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { buildChineseSummary, hostnameFromUrl } from "../utils/webpage.js";
+import { readTwitterVideoInfo, twitterMediaId } from "../utils/twitter.js";
 
 const execFileAsync = promisify(execFile);
 const EAGLE_API = "http://127.0.0.1:41595";
@@ -54,17 +55,17 @@ export async function runEagleAdapter(payload) {
 
 async function buildEagleMetadata(payload) {
   const fallback = buildFastMetadata(payload);
-  try {
-    const generated = await generateClipMetadata(payload, "eagle");
-    return mergeMetadataWithFallback(generated, fallback, payload);
-  } catch (_error) {
-    return fallback;
+  const generated = await generateClipMetadata(payload, "eagle");
+  if (generated.providerError) {
+    const reason = /timed out|timeout/i.test(generated.providerError) ? "AI 翻译超时" : "AI 翻译未完成，请检查模型连接";
+    throw new Error(`${reason}，尚未生成中文内容。请重新展开 Eagle 重试。`, { cause: new Error(generated.providerError) });
   }
+  return mergeMetadataWithFallback(generated, fallback, payload);
 }
 
 function mergeMetadataWithFallback(generated, fallback, payload) {
   const titleZh = cleanAiTitle(generated.titleZh, payload.title) || fallback.titleZh;
-  const oneLine = cleanChineseIntro(generated.oneLine || generated.summary) || fallback.oneLine;
+  const oneLine = cleanChineseIntro(generated.oneLine || generated.summary, 90) || fallback.oneLine;
   return {
     ...fallback,
     ...generated,
@@ -85,17 +86,10 @@ function cleanAiTitle(value, originalTitle = "") {
   return text;
 }
 
-function cleanChineseIntro(value) {
+function cleanChineseIntro(value, maxLength = Infinity) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (!text) return "";
-  return text.slice(0, 90);
-}
-
-function withTimeout(promise, ms, message) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
-  ]);
+  return text.slice(0, maxLength);
 }
 
 function buildFastMetadata(payload) {
@@ -362,18 +356,32 @@ async function buildImportCandidates(payload, metadata) {
   const candidates = [];
 
   if (sourceType === "twitter") {
-    const hasVideo = await hasTwitterDownloadableVideo(payload.url).catch(() => false);
-    if (hasVideo) {
-      const thumbnail = await buildTwitterPreviewThumbnail(payload, metadata);
+    const postId = new URL(payload.url).pathname.match(/\/status\/(\d+)/)?.[1];
+    const primaryVideos = [...(payload.pageAssets?.videos || []), ...(payload.pageAssets?.videoRects || []),
+      ...(payload.pageAssets?.images || []).filter((image) => twitterMediaId(image.src))]
+      .filter((media) => media.tweetScope === "primary" && media.sourcePostId === postId);
+    const mediaIds = primaryVideos
+      .flatMap((media) => [twitterMediaId(media.poster), twitterMediaId(media.src)])
+      .filter(Boolean);
+    const video = payload.pageCapture?.url && !primaryVideos.length ? null : await readTwitterVideoInfo(payload.url, { mediaIds, proxyArgs: await resolveYtDlpProxyArgs() }).catch((error) => {
+      if (error.code === "TWITTER_IDENTITY_MISMATCH") throw error;
+      return null;
+    });
+    if (video) {
       candidates.push(makeCandidate({
         kind: "twitter-url",
         sourceType,
         mediaUrl: payload.url,
-        poster: thumbnail?.filePath ? "" : "",
-        thumbnail: thumbnail || null,
+        postUrl: payload.url,
+        sourcePostId: video.postId,
+        mediaId: video.mediaId,
+        poster: video.poster,
+        duration: video.duration,
+        width: video.width,
+        height: video.height,
         selected: true,
         label: "X/Twitter 视频",
-        id: `twitter-video:${safeShellName(payload.url)}`
+        id: `twitter-video:${video.postId}:${video.mediaId}`
       }));
     }
   }
@@ -395,7 +403,8 @@ async function buildImportCandidates(payload, metadata) {
       candidates.push(...videoCandidates, ...imageCandidates);
     }
   } else {
-    const videoCandidates = await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "内容视频" });
+    const videoCandidates = sourceType === "twitter" && candidates.some((candidate) => candidate.kind === "twitter-url")
+      ? [] : await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "内容视频" });
     candidates.push(...videoCandidates);
     const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
     candidates.push(...imageCandidates.slice(0, 6));
@@ -455,6 +464,7 @@ async function importWithFallback(candidate, context) {
       fallbackReason: ""
     };
   } catch (error) {
+    if (error.code === "TWITTER_IDENTITY_MISMATCH") throw error;
     const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload, context.excludedCandidateIds);
     if (!fallback) throw error;
     return {
@@ -583,7 +593,7 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
 function buildContentVideoCandidates(payload, sourceType, options = {}) {
   const seen = new Set();
   const candidates = (payload.pageAssets?.videos || [])
-    .filter((video) => sourceType !== "twitter" || video.tweetScope === "primary")
+    .filter((video) => sourceType !== "twitter" || (video.tweetScope === "primary" && video.sourcePostId === new URL(payload.url).pathname.match(/\/status\/(\d+)/)?.[1]))
     .map((video, index) => {
       const src = normalizeContentVideoUrl(video.src || "");
       if (!src || seen.has(src)) return null;
@@ -610,116 +620,6 @@ function buildContentVideoCandidates(payload, sourceType, options = {}) {
     const thumbnail = await captureVideoThumbnail(candidate.mediaUrl, `${options.labelPrefix || "video"}-${candidate.id}`).catch(() => null);
     return thumbnail?.filePath ? { ...candidate, thumbnail } : candidate;
   }));
-}
-
-async function buildTwitterPreviewThumbnail(payload, metadata) {
-  const cropped = await cropVideoFrameFromScreenshot(payload, metadata).catch(() => null);
-  if (cropped?.filePath) return cropped;
-
-  const downloaded = await captureTwitterDownloadedFrame(payload, metadata).catch(() => null);
-  if (downloaded?.filePath) return downloaded;
-
-  if (payload.screenshotDataUrl) {
-    const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "twitter-video-frame", "png");
-    if (screenshot?.filePath) {
-      return {
-        ...screenshot,
-        source: "visible-tab-screenshot"
-      };
-    }
-  }
-  return captureTwitterThumbnail(payload.url, metadata).catch(() => null);
-}
-
-async function captureTwitterDownloadedFrame(payload, metadata) {
-  const media = await withTimeout(
-    downloadTwitterMedia(payload.url, metadata),
-    18000,
-    "X/Twitter 视频首帧下载超时"
-  );
-  const thumbnail = await captureVideoThumbnail(media.filePath, metadata.titleZh || payload.title || "twitter-video");
-  return {
-    ...thumbnail,
-    source: "yt-dlp-video-first-frame",
-    mediaFilePath: media.filePath
-  };
-}
-
-async function cropVideoFrameFromScreenshot(payload, metadata) {
-  const rect = selectVideoRect(payload.pageAssets?.videoRects);
-  if (!rect || !payload.screenshotDataUrl) return null;
-
-  const screenshot = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "twitter-visible-page", "png");
-  if (!screenshot?.filePath) return null;
-
-  const viewport = payload.pageAssets?.viewport || {};
-  const dpr = Number(viewport.devicePixelRatio || 1) || 1;
-  const imageSize = await getImageSize(screenshot.filePath).catch(() => null);
-  const crop = normalizeCropRect(rect, dpr, imageSize);
-  if (!crop) return null;
-
-  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, `clip-router-video-frame-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.jpg`);
-  await execFileAsync("ffmpeg", [
-    "-y",
-    "-i", screenshot.filePath,
-    "-vf", `crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`,
-    "-frames:v", "1",
-    "-q:v", "3",
-    filePath
-  ], { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
-
-  return {
-    filePath,
-    filename: path.basename(filePath),
-    mimeType: "image/jpeg",
-    size: await fileSize(filePath),
-    source: "visible-video-crop",
-    rect: crop
-  };
-}
-
-function selectVideoRect(rects) {
-  return (Array.isArray(rects) ? rects : [])
-    .map((rect) => ({
-      x: Number(rect.x || 0),
-      y: Number(rect.y || 0),
-      width: Number(rect.width || 0),
-      height: Number(rect.height || 0)
-    }))
-    .filter((rect) => rect.width >= 120 && rect.height >= 80)
-    .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
-}
-
-async function getImageSize(filePath) {
-  const { stdout } = await execFileAsync("ffprobe", [
-    "-v", "error",
-    "-select_streams", "v:0",
-    "-show_entries", "stream=width,height",
-    "-of", "csv=p=0:s=x",
-    filePath
-  ], { timeout: 5000, maxBuffer: 1024 * 32 });
-  const [width, height] = stdout.trim().split("x").map((value) => Number(value || 0));
-  return width && height ? { width, height } : null;
-}
-
-function normalizeCropRect(rect, dpr, imageSize = null) {
-  const x = Math.max(0, Math.round(rect.x * dpr));
-  const y = Math.max(0, Math.round(rect.y * dpr));
-  let width = Math.max(0, Math.round(rect.width * dpr));
-  let height = Math.max(0, Math.round(rect.height * dpr));
-  if (imageSize?.width && imageSize?.height) {
-    width = Math.min(width, Math.max(0, imageSize.width - x));
-    height = Math.min(height, Math.max(0, imageSize.height - y));
-  }
-  if (width < 120 || height < 80) return null;
-  return {
-    x,
-    y,
-    width: width % 2 === 0 ? width : width - 1,
-    height: height % 2 === 0 ? height : height - 1
-  };
 }
 
 function normalizeContentVideoUrl(url) {
@@ -756,49 +656,9 @@ function isTwitterDefaultOgImage(parsedUrl) {
     && /^\/rweb\/ssr\/default\/v\d+\/og\/image\.png$/i.test(parsedUrl.pathname);
 }
 
-async function downloadTwitterMedia(url, metadata) {
-  const outputTemplate = path.join(os.tmpdir(), `clip-router-eagle-${Date.now()}-${safeShellName(metadata.titleZh || "twitter-media")}.%(ext)s`);
-  const args = [
-    ...await resolveYtDlpProxyArgs(),
-    "--no-playlist",
-    "--merge-output-format",
-    "mp4",
-    "-f",
-    "bv*+ba/b",
-    "-o",
-    outputTemplate,
-    "--print",
-    "after_move:filepath",
-    url
-  ];
-  const { stdout } = await execFileAsync("yt-dlp", args, { timeout: 120000, maxBuffer: 1024 * 1024 * 2 });
-  const filePath = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
-  if (!filePath) throw new Error("yt-dlp 未返回下载文件路径");
-  return {
-    filePath,
-    filename: path.basename(filePath),
-    source: "yt-dlp",
-    size: await fileSize(filePath)
-  };
-}
-
-async function hasTwitterDownloadableVideo(url) {
-  const { stdout } = await execFileAsync("yt-dlp", [
-    ...await resolveYtDlpProxyArgs(),
-    "--no-playlist",
-    "--skip-download",
-    "--print",
-    "%(duration)s|%(ext)s|%(format_id)s|%(protocol)s|%(url)s",
-    url
-  ], { timeout: 15000, maxBuffer: 1024 * 1024 });
-  const text = stdout.trim();
-  if (!text) return false;
-  const [duration, ext, formatId, protocol, mediaUrl] = text.split("|");
-  return Number(duration) > 0
-    || /^(mp4|m4v|mov|webm)$/i.test(ext || "")
-    || /video|hls|dash|m3u8/i.test(`${formatId || ""} ${protocol || ""}`)
-    || /\.(mp4|m4v|mov|webm)(?:[?#]|$)/i.test(mediaUrl || "")
-    || /video|amplify_video|tweet_video|m3u8/i.test(mediaUrl || "");
+async function downloadTwitterMedia(url, metadata, identity = {}) {
+  const video = await readTwitterVideoInfo(url, { mediaId: identity.mediaId || "", proxyArgs: await resolveYtDlpProxyArgs() });
+  return downloadMediaUrl(video.videoUrl, metadata, "twitter");
 }
 
 async function downloadMediaUrl(mediaUrl, metadata, sourceType = "media") {
@@ -824,41 +684,6 @@ async function downloadMediaUrl(mediaUrl, metadata, sourceType = "media") {
     filename: path.basename(filePath),
     source: "yt-dlp",
     size: await fileSize(filePath)
-  };
-}
-
-async function captureTwitterThumbnail(url, metadata) {
-  const dir = path.join(os.tmpdir(), "chrome-clip-router-assets");
-  await fs.mkdir(dir, { recursive: true });
-  const outputTemplate = path.join(dir, `clip-router-thumb-${Date.now()}-${safeShellName(metadata.titleZh || "twitter")}.%(ext)s`);
-  const args = [
-    ...await resolveYtDlpProxyArgs(),
-    "--no-playlist",
-    "--skip-download",
-    "--write-thumbnail",
-    "--convert-thumbnails",
-    "jpg",
-    "-o",
-    outputTemplate,
-    "--print",
-    "thumbnail",
-    url
-  ];
-  await execFileAsync("yt-dlp", args, { timeout: 12000, maxBuffer: 1024 * 1024 * 2 });
-  const files = await fs.readdir(dir);
-  const prefix = path.basename(outputTemplate).replace("%(ext)s", "");
-  const file = files
-    .filter((name) => name.startsWith(prefix) && /\.(jpg|jpeg|png|webp)$/i.test(name))
-    .sort()
-    .at(-1);
-  if (!file) throw new Error("yt-dlp 未返回视频缩略图");
-  const filePath = path.join(dir, file);
-  return {
-    filePath,
-    filename: file,
-    mimeType: contentTypeForImagePath(filePath),
-    size: await fileSize(filePath),
-    source: "yt-dlp-thumbnail"
   };
 }
 
@@ -893,7 +718,7 @@ function contentTypeForImagePath(filePath) {
 
 async function importToEagle(importPlan, payload, metadata, folders, annotation) {
   if (importPlan.kind === "twitter-url") {
-    const asset = await downloadTwitterMedia(payload.url, metadata);
+    const asset = await downloadTwitterMedia(payload.url, metadata, importPlan);
     importPlan.asset = asset;
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
   }
@@ -1118,6 +943,7 @@ function summarizeImportPlan(importPlan) {
     carouselIndex: importPlan.carouselIndex,
     postUrl: importPlan.postUrl || "",
     mediaId: importPlan.mediaId || "",
+    sourcePostId: importPlan.sourcePostId || "",
     shortcode: importPlan.shortcode || "",
     description: importPlan.description || "",
     reason: importPlan.reason || ""
@@ -1545,7 +1371,7 @@ function inferUseCase(payload, metadata) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  if (/ai|claude|cursor|codex|copilot|agent|技能|skill/.test(text) && /动效|motion|transition|动画|交互/.test(text)) {
+  if (/\b(?:ai|claude|cursor|codex|copilot|agents?|skills?)\b|技能/.test(text) && /动效|motion|transition|动画|交互/.test(text)) {
     return "AI 编程、产品动效与交互设计参考。";
   }
   if (/动效|motion|transition|动画/.test(text)) return "网页动效与交互实现参考。";

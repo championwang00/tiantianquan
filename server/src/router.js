@@ -280,6 +280,21 @@ function validatePayload(payload) {
     throw badRequest("Targets must include eagle, bear, or obsidian");
   }
 
+  const pageCapture = sanitizeObject(payload.pageCapture);
+  if (pageCapture.url) {
+    const requested = new URL(payload.url);
+    const captured = new URL(pageCapture.url);
+    requested.hash = "";
+    captured.hash = "";
+    if (normalizeSourceUrl(requested.href) !== normalizeSourceUrl(captured.href)) {
+      throw badRequest("采集页面与请求页面不一致，请在目标帖子上重新打开插件。");
+    }
+    const postId = /(^|\.)(x|twitter)\.com$/.test(requested.hostname) ? requested.pathname.match(/\/status\/(\d+)/)?.[1] : "";
+    if (postId && (pageCapture.postId !== postId || pageCapture.primaryPostId !== postId)) {
+      throw badRequest("采集帖子与请求帖子不一致，请等待原帖加载后重试。");
+    }
+  }
+
   return {
     source: payload.source || "chrome-extension",
     captureUrl: payload.url,
@@ -292,6 +307,7 @@ function validatePayload(payload) {
     pageMeta: sanitizeObject(payload.pageMeta),
     pageAssets: sanitizePageAssets(payload.pageAssets),
     pageContent: sanitizePageContent(payload.pageContent),
+    pageCapture,
     screenshotDataUrl: typeof payload.screenshotDataUrl === "string" ? payload.screenshotDataUrl : "",
     capturedAt: payload.capturedAt || new Date().toISOString()
   };

@@ -77,6 +77,16 @@ preview. Previews are field-aligned per app: Eagle shows title, description,
 link, tags, and a real Eagle folder dropdown; Bear shows title, screenshot,
 description, and link; Obsidian writes Markdown into `mynote/Clippings` with
 typed properties plus the clipped body.
+Eagle waits up to 45 seconds for translated metadata before presenting its
+confirmation preview. Translation failures are shown as errors that can be
+retried by reopening the Eagle section; placeholder summaries are not offered
+for confirmation. Lightweight captures include source text, X captures use the
+current post's text, and generated descriptions are not truncated to 90 characters.
+X captures verify the requested post against the page actually read, exclude
+quoted posts and reply media, and ignore older preview requests after a new one
+starts. Video previews use the original media's thumbnail, not a crop of the
+visible page. Saving verifies the post and selected media ID again; ambiguous
+or mismatched videos stop with an error instead of substituting another item.
 Eagle supports screenshot, top image, URL, and HTML snapshot modes. Eagle and
 Bear previews expose discovered media in a three-column grid with select-all,
 clear, and per-item multi-selection; confirmation processes the selected items
