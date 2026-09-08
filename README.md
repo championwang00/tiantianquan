@@ -86,7 +86,10 @@ current post's text, and generated descriptions are not truncated to 90 characte
 X captures verify the requested post against the page actually read, exclude
 quoted posts and reply media, and ignore older preview requests after a new one
 starts. Video previews use the original media's thumbnail, not a crop of the
-visible page. Saving verifies the post and selected media ID again; ambiguous
+visible page. X videos remain detectable when yt-dlp returns separate format
+metadata without a top-level media URL; the router selects the highest-quality
+direct video format while retaining the post and media identity checks. Saving
+verifies the post and selected media ID again; ambiguous
 or mismatched videos stop with an error instead of substituting another item.
 Xiaohongshu video posts are scoped to the current note and use its structured
 video URL, cover, and duration. The collector skips recommendation-feed media,

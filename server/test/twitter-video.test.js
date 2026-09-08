@@ -20,6 +20,29 @@ test("Twitter media id is distinct from post id and remains attached to the veri
   assert.equal(video.poster, original.thumbnail);
 });
 
+test("Twitter accepts format-list video metadata when yt-dlp omits the top-level URL", async () => {
+  const { selectTwitterVideoInfo } = await import("../src/utils/twitter.js");
+  const highQualityUrl = "https://video.twimg.com/amplify_video/2072646212214267904/vid/avc1/1080x1350/high.mp4?tag=29";
+  const info = {
+    ...original,
+    url: null,
+    width: 1080,
+    height: 1350,
+    requested_formats: [
+      { url: "https://video.twimg.com/amplify_video/2072646212214267904/pl/avc1/1080x1350/video.m3u8", vcodec: "avc1.640028", acodec: "none", width: 1080, height: 1350 }
+    ],
+    formats: [
+      { url: "https://video.twimg.com/amplify_video/2072646212214267904/vid/avc1/320x400/low.mp4", protocol: "https", width: 320, height: 400 },
+      { url: highQualityUrl, protocol: "https", width: 1080, height: 1350 },
+      { url: "https://video.twimg.com/amplify_video/2072646212214267904/pl/mp4a/128000/audio.m3u8", vcodec: "none", width: null, height: null }
+    ]
+  };
+
+  const video = selectTwitterVideoInfo(info, postUrl, { mediaId: original.id });
+  assert.equal(video.mediaId, original.id);
+  assert.equal(video.videoUrl, highQualityUrl);
+});
+
 test("multiple Twitter videos require identity instead of silently choosing the last file", async () => {
   const { selectTwitterVideoInfo } = await import("../src/utils/twitter.js");
   const info = { _type: "playlist", entries: [original, quote] };
