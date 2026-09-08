@@ -356,6 +356,7 @@ async function buildImportCandidates(payload, metadata, dependencies = {}) {
   const captureMode = payload.options?.eagle?.captureMode || "screenshot";
   const candidates = [];
   const readXiaohongshuVideo = dependencies.readXiaohongshuVideoInfo || readXiaohongshuVideoInfo;
+  const captureVideoFrame = dependencies.captureVideoThumbnail || captureVideoThumbnail;
 
   if (sourceType === "twitter") {
     const postId = new URL(payload.url).pathname.match(/\/status\/(\d+)/)?.[1];
@@ -393,6 +394,9 @@ async function buildImportCandidates(payload, metadata, dependencies = {}) {
       if (error.code === "XIAOHONGSHU_IDENTITY_MISMATCH") throw error;
       return null;
     });
+    const verifiedThumbnail = verifiedVideo
+      ? await captureVideoFrame(verifiedVideo.videoUrl, `xiaohongshu-${verifiedVideo.postId}`).catch(() => null)
+      : null;
     const videoCandidates = verifiedVideo ? [makeCandidate({
       kind: "xiaohongshu-url",
       sourceType,
@@ -400,6 +404,7 @@ async function buildImportCandidates(payload, metadata, dependencies = {}) {
       sourcePostId: verifiedVideo.postId,
       mediaUrl: verifiedVideo.videoUrl,
       poster: verifiedVideo.poster,
+      thumbnail: verifiedThumbnail?.filePath ? verifiedThumbnail : null,
       duration: verifiedVideo.duration,
       selected: true,
       label: "小红书视频",

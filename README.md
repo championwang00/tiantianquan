@@ -91,6 +91,8 @@ Xiaohongshu video posts are scoped to the current note and use its structured
 video URL, cover, and duration. The collector skips recommendation-feed media,
 scripts, and icons, and refreshes the signed video URL again when saving so
 Eagle receives a real media file with a cover instead of a page asset.
+The preview also extracts a local first frame from the verified video, so a
+blocked or expired Xiaohongshu cover URL cannot leave the video card blank.
 Eagle supports screenshot, top image, URL, and HTML snapshot modes. Eagle and
 Bear previews expose discovered media in a three-column grid with select-all,
 clear, and per-item multi-selection; confirmation processes the selected items

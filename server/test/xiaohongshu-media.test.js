@@ -81,6 +81,7 @@ test("rejects Xiaohongshu media when the canonical post identity differs", () =>
 });
 
 test("builds one verified Xiaohongshu video candidate and ignores captured scripts, icons and feed images", async () => {
+  const capturedVideoUrls = [];
   const candidates = await __testHooks.buildImportCandidates({
     url: postUrl,
     title: "Sports Life System Coming soon",
@@ -101,7 +102,17 @@ test("builds one verified Xiaohongshu video candidate and ignores captured scrip
       videoUrl,
       poster,
       duration: 10.6
-    })
+    }),
+    captureVideoThumbnail: async (url) => {
+      capturedVideoUrls.push(url);
+      return {
+        filePath: "/tmp/xiaohongshu-first-frame.jpg",
+        filename: "xiaohongshu-first-frame.jpg",
+        mimeType: "image/jpeg",
+        size: 2048,
+        source: "ffmpeg-first-frame"
+      };
+    }
   });
 
   const media = __testHooks.summarizeCandidates(candidates)
@@ -110,8 +121,11 @@ test("builds one verified Xiaohongshu video candidate and ignores captured scrip
   assert.equal(media[0].id, "xiaohongshu-video:6a9cf9340000000028037b90");
   assert.equal(media[0].mediaUrl, videoUrl);
   assert.equal(media[0].poster, poster);
+  assert.equal(media[0].thumbnailPath, "/tmp/xiaohongshu-first-frame.jpg");
+  assert.equal(media[0].thumbnailFilename, "xiaohongshu-first-frame.jpg");
   assert.equal(media[0].duration, 10.6);
   assert.equal(media[0].selected, true);
+  assert.deepEqual(capturedVideoUrls, [videoUrl]);
 });
 
 test("does not fall back to stale captured media when Xiaohongshu post identity mismatches", async () => {
