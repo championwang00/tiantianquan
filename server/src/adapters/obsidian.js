@@ -6,7 +6,7 @@ import dns from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
-import { generateClipMetadata } from "../utils/provider.js";
+import { generateClipMetadata, requireGeneratedMetadata } from "../utils/provider.js";
 import { hostnameFromUrl, safeFileName } from "../utils/webpage.js";
 import { getJournalDate } from "../utils/time.js";
 import { articleHtmlToMarkdown, extractArticleImageUrls } from "../utils/article.js";
@@ -22,8 +22,8 @@ const DEFAULT_CLIP_FOLDER = path.join("mynote", "Clippings");
 const OBSIDIAN_APP_CONFIG = path.join(os.homedir(), "Library", "Application Support", "obsidian", "obsidian.json");
 
 export async function runObsidianAdapter(payload) {
-  const config = await getObsidianConfig();
   const metadata = await buildMetadata(payload);
+  const config = await getObsidianConfig();
   const writePlan = buildWritePlan(payload, config, metadata);
 
   return {
@@ -457,7 +457,7 @@ function buildObsidianPreviewFields(payload, metadata, writePlan) {
 }
 
 async function buildMetadata(payload) {
-  const generated = await generateClipMetadata(payload, "obsidian");
+  const generated = requireGeneratedMetadata(await generateClipMetadata(payload, "obsidian"), "Obsidian");
   const host = hostnameFromUrl(payload.url);
   const originalTitle = payload.title || host;
   const text = `${payload.title} ${payload.url} ${payload.selectedText} ${payload.userNote}`.toLowerCase();

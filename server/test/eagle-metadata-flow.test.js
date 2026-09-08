@@ -5,6 +5,8 @@ import vm from "node:vm";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 import { __testHooks, runEagleAdapter } from "../src/adapters/eagle.js";
+import { runBearAdapter } from "../src/adapters/bear.js";
+import { runObsidianAdapter } from "../src/adapters/obsidian.js";
 import { __resetProviderTestHooks, __setProviderTestHooks, generateClipMetadata } from "../src/utils/provider.js";
 
 const payload = {
@@ -39,6 +41,21 @@ test("first Eagle preview waits for a translation that takes longer than twelve 
 test("failed translation cannot become an Eagle confirmation preview", async () => {
   __setProviderTestHooks({ callProvider: async () => { throw new Error("Provider metadata generation timed out"); } });
   await assert.rejects(runEagleAdapter({ ...payload, url: "https://example.com/post" }), /翻译.*(?:失败|未完成|超时)/);
+});
+
+test("provider balance failures stop every preview with an actionable summary error", async () => {
+  __setProviderTestHooks({ callProvider: async () => { throw new Error("Insufficient Balance"); } });
+  const articlePayload = {
+    url: "https://claude.com/blog/how-warp-builds-self-improving-agents-on-claude",
+    title: "How Warp builds self-improving agents on Claude",
+    pageMeta: { description: "How Warp devised a simple development pattern for self-improving agents." },
+    pageAssets: { images: [], videos: [], videoRects: [] },
+    pageContent: { text: "Warp uses a base skill, human feedback, and an improver skill to create a self-improvement loop." }
+  };
+
+  for (const [target, adapter] of [["Eagle", runEagleAdapter], ["Bear", runBearAdapter], ["Obsidian", runObsidianAdapter]]) {
+    await assert.rejects(adapter(articlePayload), new RegExp(`模型余额不足.*摘要.*${target}`));
+  }
 });
 
 test("a stalled provider request is cancelled and a later attempt can succeed", async (t) => {

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { generateClipMetadata } from "../utils/provider.js";
+import { generateClipMetadata, requireGeneratedMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { hostnameFromUrl } from "../utils/webpage.js";
 import { loadEnv } from "../utils/env.js";
@@ -43,7 +43,7 @@ export const __testBuildBearXCallbackUrl = buildBearXCallbackUrl;
 export const __testIndentBearImageMarkdown = indentBearImageMarkdown;
 
 export async function runBearAdapter(payload) {
-  const metadata = await generateClipMetadata(payload, "bear");
+  const metadata = requireGeneratedMetadata(await generateClipMetadata(payload, "bear"), "Bear");
   const candidates = await buildBearCandidates(payload, metadata);
   const visualAsset = summarizeCandidates(candidates).find((candidate) => candidate.selected) || null;
   const draftParts = buildBearDraftParts(payload, metadata, visualAsset);

@@ -19,6 +19,22 @@ export function __resetProviderTestHooks() {
   metadataCache.clear();
 }
 
+export function requireGeneratedMetadata(metadata, targetLabel) {
+  if (!metadata?.providerError) return metadata;
+
+  const providerError = String(metadata.providerError);
+  let message;
+  if (/insufficient balance|余额不足|balance.*insufficient/i.test(providerError)) {
+    message = `模型余额不足，尚未生成中文翻译和摘要。请充值或在插件设置中切换模型后，重新展开 ${targetLabel} 重试。`;
+  } else if (/timed out|timeout/i.test(providerError)) {
+    message = `AI 翻译和摘要超时，尚未生成中文内容。请重新展开 ${targetLabel} 重试。`;
+  } else {
+    message = `AI 翻译和摘要未完成，请检查模型连接，尚未生成中文内容。请重新展开 ${targetLabel} 重试。`;
+  }
+
+  throw new Error(message, { cause: new Error(providerError) });
+}
+
 export async function generateClipMetadata(payload, target) {
   const isTweet = /(?:^|\.)x\.com$|(?:^|\.)twitter\.com$/i.test(new URL(payload.url || "https://invalid.local").hostname);
   const pageText = resolveMetadataText(payload, isTweet);

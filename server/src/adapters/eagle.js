@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { generateClipMetadata } from "../utils/provider.js";
+import { generateClipMetadata, requireGeneratedMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { buildChineseSummary, hostnameFromUrl } from "../utils/webpage.js";
 import { readTwitterVideoInfo, twitterMediaId } from "../utils/twitter.js";
@@ -56,11 +56,7 @@ export async function runEagleAdapter(payload) {
 
 async function buildEagleMetadata(payload) {
   const fallback = buildFastMetadata(payload);
-  const generated = await generateClipMetadata(payload, "eagle");
-  if (generated.providerError) {
-    const reason = /timed out|timeout/i.test(generated.providerError) ? "AI 翻译超时" : "AI 翻译未完成，请检查模型连接";
-    throw new Error(`${reason}，尚未生成中文内容。请重新展开 Eagle 重试。`, { cause: new Error(generated.providerError) });
-  }
+  const generated = requireGeneratedMetadata(await generateClipMetadata(payload, "eagle"), "Eagle");
   return mergeMetadataWithFallback(generated, fallback, payload);
 }
 

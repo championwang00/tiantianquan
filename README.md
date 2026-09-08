@@ -77,10 +77,11 @@ preview. Previews are field-aligned per app: Eagle shows title, description,
 link, tags, and a real Eagle folder dropdown; Bear shows title, screenshot,
 description, and link; Obsidian writes Markdown into `mynote/Clippings` with
 typed properties plus the clipped body.
-Eagle waits up to 45 seconds for translated metadata before presenting its
-confirmation preview. Translation failures are shown as errors that can be
-retried by reopening the Eagle section; placeholder summaries are not offered
-for confirmation. Lightweight captures include source text, X captures use the
+All three channels wait for translated metadata before presenting a confirmation
+preview. Provider failures stop Eagle, Bear, and Obsidian before any placeholder
+summary can be written. An insufficient model balance is identified explicitly,
+with instructions to recharge or switch models and then reopen the channel.
+Lightweight captures include source text, X captures use the
 current post's text, and generated descriptions are not truncated to 90 characters.
 X captures verify the requested post against the page actually read, exclude
 quoted posts and reply media, and ignore older preview requests after a new one
