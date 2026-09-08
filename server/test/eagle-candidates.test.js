@@ -451,6 +451,27 @@ test("generic websites expose captured videos alongside images", async () => {
   assert.equal(media[0].duration, 6.5);
 });
 
+test("rejects scripts and icons that contain video-like host names", async () => {
+  const candidates = await __testHooks.buildImportCandidates({
+    url: "https://example.com/gallery",
+    options: { eagle: { captureMode: "screenshot" } },
+    pageMeta: {},
+    pageAssets: {
+      videos: [
+        { src: "https://fe-static.xhscdn.com/formula-static/video-player.js", poster: "https://cdn.example/cover.jpg" },
+        { src: "https://fe-video-qc.xhscdn.com/fe-platform/site.ico", poster: "https://cdn.example/cover.jpg" },
+        { src: "https://sns-video-qc.xhscdn.com/stream/original.mp4?sign=test", poster: "https://cdn.example/cover.jpg" }
+      ],
+      images: []
+    },
+    pageContent: {}
+  }, { titleZh: "Gallery" });
+  const videos = __testHooks.summarizeCandidates(candidates).filter((candidate) => candidate.kind === "media-url");
+  assert.deepEqual(videos.map((candidate) => candidate.mediaUrl), [
+    "https://sns-video-qc.xhscdn.com/stream/original.mp4?sign=test"
+  ]);
+});
+
 test("extracts every Instagram carousel item from embedded Relay data when the post has no article DOM", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(fs.readFileSync(path.resolve(import.meta.dirname, "../../extension/instagramCarousel.js"), "utf8"), context);

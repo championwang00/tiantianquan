@@ -361,16 +361,27 @@ async function collectPageContext(tab, options = {}) {
         const mainTweetRoot = findMainTweetRoot();
         const isTweet = /(^|\.)(x|twitter)\.com$/.test(location.hostname) && /\/status\/\d+/.test(location.pathname);
         const postId = isTweet ? location.pathname.match(/\/status\/(\d+)/)[1] : "";
+        const isXiaohongshuPost = /(^|\.)xiaohongshu\.com$/.test(location.hostname) && /^\/explore\/[^/]+/.test(location.pathname);
+        const xiaohongshuRoot = isXiaohongshuPost ? document.querySelector("#noteContainer, .note-container") : null;
+        const xiaohongshuMediaRoot = xiaohongshuRoot?.querySelector(".media-container") || xiaohongshuRoot;
+        const structuredVideos = isXiaohongshuPost ? collectStructuredVideos() : [];
         const weChatRoot = findWeChatArticleRoot();
-        const article = isTweet ? mainTweetRoot?.cloneNode(true) || document.createElement("div") : findReadableRoot(weChatRoot);
+        const article = isTweet
+          ? mainTweetRoot?.cloneNode(true) || document.createElement("div")
+          : isXiaohongshuPost
+            ? xiaohongshuRoot?.cloneNode(true) || document.createElement("div")
+            : findReadableRoot(weChatRoot);
         if (isTweet) for (const quote of article.querySelectorAll('[data-testid="quoteTweet"], div[role="link"]')) quote.remove();
-        const structuredArticle = isTweet ? article : weChatRoot || findArticleRoot();
+        const structuredArticle = isTweet || isXiaohongshuPost ? article : weChatRoot || findArticleRoot();
         const visibleText = isTweet
           ? getVisibleText(article.querySelector('[data-testid="tweetText"]'))
           : getVisibleText(article);
-        const images = collectImages(deepAssets, mainTweetRoot).slice(0, deepAssets ? 30 : 6);
-        const videos = deepAssets ? collectVideos(mainTweetRoot).slice(0, 20) : [];
-        const videoRects = deepAssets ? collectVideoRects(mainTweetRoot).slice(0, 5) : [];
+        const mediaRoot = isTweet ? mainTweetRoot : xiaohongshuMediaRoot;
+        const images = isXiaohongshuPost && structuredVideos.length
+          ? []
+          : collectImages(deepAssets, mediaRoot).slice(0, deepAssets ? 30 : 6);
+        const videos = deepAssets ? collectVideos(mediaRoot, structuredVideos).slice(0, 20) : [];
+        const videoRects = deepAssets ? collectVideoRects(mediaRoot).slice(0, 5) : [];
         const carousel = deepAssets ? await collectInstagramCarousel() : [];
         const content = fullContent
           ? {
@@ -386,7 +397,7 @@ async function collectPageContext(tab, options = {}) {
             description: isTweet ? visibleText : metaContent('meta[name="description"]') || metaContent('meta[property="og:description"]'),
             author: isTweet ? getVisibleText(mainTweetRoot?.querySelector('[data-testid="User-Name"]')) : metaContent('meta[name="author"]') || metaContent('meta[property="article:author"]'),
             siteName: metaContent('meta[property="og:site_name"]'),
-            image: isTweet ? "" : normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')),
+            image: isTweet ? "" : structuredVideos[0]?.poster || normalizeMetaImage(metaContent('meta[property="og:image"]') || metaContent('meta[name="twitter:image"]')),
             canonical: isTweet ? location.href : attr('link[rel="canonical"]', "href"),
             published: metaContent('meta[property="article:published_time"]') || metaContent('meta[name="article:published_time"]')
           },
@@ -554,7 +565,7 @@ async function collectPageContext(tab, options = {}) {
             items.push({ src: normalized, alt, width, height, tweetScope: scope, sourcePostId: scope === "primary" ? postId : "" });
           };
 
-          const imageNodes = scopeRoot ? [...scopeRoot.querySelectorAll("img")].filter((image) => isPrimaryTweetNode(image, scopeRoot)) : [...document.images];
+          const imageNodes = scopeRoot ? [...scopeRoot.querySelectorAll("img")].filter((image) => isScopedMediaNode(image, scopeRoot)) : [...document.images];
           const documentImages = deep ? imageNodes : imageNodes.slice(0, 80);
           for (const image of documentImages) {
             const srcset = image.getAttribute("srcset") || image.getAttribute("data-srcset") || "";
@@ -571,7 +582,7 @@ async function collectPageContext(tab, options = {}) {
           if (deep) {
             const styledNodes = scopeRoot ? [...scopeRoot.querySelectorAll("[style]")] : [...document.querySelectorAll("[style]")];
             for (const node of styledNodes) {
-              if (scopeRoot && !isPrimaryTweetNode(node, scopeRoot)) continue;
+              if (scopeRoot && !isScopedMediaNode(node, scopeRoot)) continue;
               const match = String(node.getAttribute("style") || "").match(/url\\((['"]?)(.*?)\\1\\)/);
               if (match?.[2]) push(match[2], node.getAttribute("aria-label") || "", node.clientWidth || 0, node.clientHeight || 0, tweetScopeForImage(node, scopeRoot));
             }
@@ -611,8 +622,12 @@ async function collectPageContext(tab, options = {}) {
         }
 
         function tweetScopeForImage(node, scopeRoot = null) {
-          if (!scopeRoot) return "";
+          if (!scopeRoot || !isTweet) return "";
           return isPrimaryTweetNode(node, scopeRoot) ? "primary" : "";
+        }
+
+        function isScopedMediaNode(node, scopeRoot) {
+          return isTweet ? isPrimaryTweetNode(node, scopeRoot) : Boolean(scopeRoot?.contains(node));
         }
 
         function normalizeImageAssetUrl(src) {
@@ -637,7 +652,7 @@ async function collectPageContext(tab, options = {}) {
           return /abs\.twimg\.com\/rweb\/ssr\/default\/v\\d+\/og\/image\.png/i.test(String(src || ""));
         }
 
-        function collectVideos(scopeRoot = null) {
+        function collectVideos(scopeRoot = null, structured = []) {
           if (isTweet && !scopeRoot) return [];
           const seen = new Set();
           const items = [];
@@ -655,12 +670,19 @@ async function collectPageContext(tab, options = {}) {
               width: Number(detail.width || 0),
               height: Number(detail.height || 0),
               duration: Number(detail.duration || 0),
-              tweetScope: scopeRoot ? "primary" : "",
-              sourcePostId: scopeRoot ? postId : ""
+              tweetScope: scopeRoot && isTweet ? "primary" : "",
+              sourcePostId: scopeRoot && isTweet ? postId : ""
             });
           };
 
-          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => isPrimaryTweetNode(video, scopeRoot)) : [...document.querySelectorAll("video")];
+          for (const video of structured) {
+            push(video.src, video.label || "页面视频", video.poster || "", {
+              source: "json-ld",
+              duration: video.duration || 0
+            });
+          }
+
+          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => isScopedMediaNode(video, scopeRoot)) : [...document.querySelectorAll("video")];
           for (const video of videoNodes) {
             const detail = {
               source: "video-element",
@@ -678,8 +700,8 @@ async function collectPageContext(tab, options = {}) {
           }
 
           if (!scopeRoot) {
-            for (const node of [...document.querySelectorAll("[data-video-url], [data-video-src], [data-mp4], [data-stream-url], [data-src], [href], [src]")].slice(0, 1200)) {
-              for (const name of ["data-video-url", "data-video-src", "data-mp4", "data-stream-url", "data-src", "href", "src"]) {
+            for (const node of [...document.querySelectorAll("[data-video-url], [data-video-src], [data-mp4], [data-stream-url]")].slice(0, 300)) {
+              for (const name of ["data-video-url", "data-video-src", "data-mp4", "data-stream-url"]) {
                 const value = node.getAttribute(name);
                 if (!value) continue;
                 push(value, node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 80) || "页面视频", "", { source: `attr:${name}` });
@@ -703,7 +725,7 @@ async function collectPageContext(tab, options = {}) {
           }
 
           if (!scopeRoot && performance?.getEntriesByType) {
-            for (const entry of performance.getEntriesByType("resource").slice(-800)) {
+            for (const entry of performance.getEntriesByType("resource").slice(-300)) {
               push(entry.name, "已加载视频资源", "", { source: "performance", initiatorType: entry.initiatorType || "" });
             }
           }
@@ -720,7 +742,7 @@ async function collectPageContext(tab, options = {}) {
 
         function collectVideoRects(scopeRoot = null) {
           if (isTweet && !scopeRoot) return [];
-          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => isPrimaryTweetNode(video, scopeRoot)) : [...document.querySelectorAll("video")];
+          const videoNodes = scopeRoot ? [...scopeRoot.querySelectorAll("video")].filter((video) => isScopedMediaNode(video, scopeRoot)) : [...document.querySelectorAll("video")];
           return videoNodes
             .map((video, index) => {
               const rect = video.getBoundingClientRect();
@@ -731,8 +753,8 @@ async function collectPageContext(tab, options = {}) {
               const width = Math.max(0, right - left);
               const height = Math.max(0, bottom - top);
               return {
-                tweetScope: scopeRoot ? "primary" : "",
-                sourcePostId: scopeRoot ? postId : "",
+                tweetScope: scopeRoot && isTweet ? "primary" : "",
+                sourcePostId: scopeRoot && isTweet ? postId : "",
                 poster: video.poster || "",
                 x: left,
                 y: top,
@@ -756,6 +778,46 @@ async function collectPageContext(tab, options = {}) {
           return [...urls].map(cleanEscapedUrl);
         }
 
+        function collectStructuredVideos() {
+          const items = [];
+          const visit = (value) => {
+            if (Array.isArray(value)) { for (const item of value) visit(item); return; }
+            if (!value || typeof value !== "object") return;
+            const types = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
+            if (types.some((type) => String(type).toLowerCase() === "videoobject") && value.contentUrl) {
+              const thumbnail = Array.isArray(value.thumbnailUrl) ? value.thumbnailUrl[0] : value.thumbnailUrl;
+              items.push({
+                src: normalizeXiaohongshuUrl(value.contentUrl),
+                poster: normalizeXiaohongshuUrl(thumbnail),
+                duration: parseStructuredDuration(value.duration),
+                label: String(value.name || "小红书视频")
+              });
+            }
+            if (value["@graph"]) visit(value["@graph"]);
+          };
+          for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+            try { visit(JSON.parse(script.textContent || "null")); } catch (_error) {}
+          }
+          return items.filter((item) => item.src);
+        }
+
+        function normalizeXiaohongshuUrl(value) {
+          if (!value) return "";
+          try {
+            const url = new URL(value, location.href);
+            if (url.hostname === "xhscdn.com" || url.hostname.endsWith(".xhscdn.com")) url.protocol = "https:";
+            return url.toString();
+          } catch (_error) { return ""; }
+        }
+
+        function parseStructuredDuration(value) {
+          const text = String(value || "").trim();
+          const iso = text.match(/^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+          if (iso) return Number(iso[1] || 0) * 3600 + Number(iso[2] || 0) * 60 + Number(iso[3] || 0);
+          const parts = text.split(":").map(Number);
+          return parts.length >= 2 && parts.every(Number.isFinite) ? parts.reduce((total, part) => total * 60 + part, 0) : 0;
+        }
+
         function cleanEscapedUrl(value) {
           return String(value || "")
             .replace(/\\u002F/g, "/")
@@ -769,8 +831,13 @@ async function collectPageContext(tab, options = {}) {
         function isLikelyVideoUrl(url, detail = {}) {
           const source = String(detail.source || "");
           const initiatorType = String(detail.initiatorType || "");
+          let extension = "";
+          try { extension = new URL(url).pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || ""; } catch (_error) {}
+          if (extension && !["mp4", "m4v", "mov", "webm", "m3u8"].includes(extension)) return false;
           return /\.(mp4|m4v|mov|webm|m3u8)(?:[?#]|$)/i.test(url)
-            || /video|stream|m3u8|mp4|sns-video|xhscdn/i.test(url)
+            || (["video-element", "json-ld", "meta"].includes(source) && /video|stream|media|xhscdn/i.test(url))
+            || (source.startsWith("attr:data-video") || source === "attr:data-mp4" || source === "attr:data-stream-url")
+            || (/video|media/i.test(initiatorType) && /video|stream|media|xhscdn/i.test(url))
             || (/user-attachments\/assets/i.test(url) && (
               source === "video-element"
               || source === "script"

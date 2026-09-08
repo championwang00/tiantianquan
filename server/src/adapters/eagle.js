@@ -7,6 +7,7 @@ import { generateClipMetadata } from "../utils/provider.js";
 import { saveDataUrlAsset } from "../utils/assets.js";
 import { buildChineseSummary, hostnameFromUrl } from "../utils/webpage.js";
 import { readTwitterVideoInfo, twitterMediaId } from "../utils/twitter.js";
+import { readXiaohongshuVideoInfo } from "../utils/xiaohongshu.js";
 
 const execFileAsync = promisify(execFile);
 const EAGLE_API = "http://127.0.0.1:41595";
@@ -350,10 +351,11 @@ async function buildImportPlan(payload, metadata) {
   return { kind: "url", sourceType };
 }
 
-async function buildImportCandidates(payload, metadata) {
+async function buildImportCandidates(payload, metadata, dependencies = {}) {
   const sourceType = detectSourceType(payload.url);
   const captureMode = payload.options?.eagle?.captureMode || "screenshot";
   const candidates = [];
+  const readXiaohongshuVideo = dependencies.readXiaohongshuVideoInfo || readXiaohongshuVideoInfo;
 
   if (sourceType === "twitter") {
     const postId = new URL(payload.url).pathname.match(/\/status\/(\d+)/)?.[1];
@@ -387,10 +389,32 @@ async function buildImportCandidates(payload, metadata) {
   }
 
   if (sourceType === "xiaohongshu") {
-    const videoCandidates = await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书视频" });
+    const verifiedVideo = await readXiaohongshuVideo(payload.url).catch((error) => {
+      if (error.code === "XIAOHONGSHU_IDENTITY_MISMATCH") throw error;
+      return null;
+    });
+    const videoCandidates = verifiedVideo ? [makeCandidate({
+      kind: "xiaohongshu-url",
+      sourceType,
+      postUrl: payload.url,
+      sourcePostId: verifiedVideo.postId,
+      mediaUrl: verifiedVideo.videoUrl,
+      poster: verifiedVideo.poster,
+      duration: verifiedVideo.duration,
+      selected: true,
+      label: "小红书视频",
+      id: `xiaohongshu-video:${verifiedVideo.postId}`
+    })] : await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书视频" });
     candidates.push(...videoCandidates);
-    const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "小红书图片" });
-    candidates.push(...imageCandidates);
+    const isVideoPage = Boolean(verifiedVideo || videoCandidates.length || payload.pageAssets?.videoRects?.length);
+    if (!isVideoPage) {
+      const imageCandidates = buildContentImageCandidates(payload, sourceType, {
+        selectedFirst: true,
+        labelPrefix: "小红书图片",
+        includeMetaImage: false
+      });
+      candidates.push(...imageCandidates);
+    }
   } else if (sourceType === "instagram") {
     const carouselCandidates = buildInstagramCarouselCandidates(payload);
     if (carouselCandidates.length) {
@@ -464,7 +488,7 @@ async function importWithFallback(candidate, context) {
       fallbackReason: ""
     };
   } catch (error) {
-    if (error.code === "TWITTER_IDENTITY_MISMATCH") throw error;
+    if (["TWITTER_IDENTITY_MISMATCH", "XIAOHONGSHU_IDENTITY_MISMATCH"].includes(error.code)) throw error;
     const fallback = selectFallbackCandidate(candidate, context.writePlan, context.payload, context.excludedCandidateIds);
     if (!fallback) throw error;
     return {
@@ -476,7 +500,7 @@ async function importWithFallback(candidate, context) {
 }
 
 function selectFallbackCandidate(candidate, writePlan, payload, excludedCandidateIds = new Set()) {
-  if (!["twitter-url", "media-url"].includes(candidate?.kind)) return null;
+  if (!["twitter-url", "xiaohongshu-url", "media-url"].includes(candidate?.kind)) return null;
   const captureMode = payload?.options?.eagle?.captureMode || "screenshot";
   const candidates = Array.isArray(writePlan?.candidates) ? writePlan.candidates : [];
   const available = (nextCandidate) => nextCandidate.id !== candidate.id && !excludedCandidateIds.has(nextCandidate.id);
@@ -564,7 +588,9 @@ function buildInstagramCarouselCandidates(payload) {
 function buildContentImageCandidates(payload, sourceType, options = {}) {
   const seen = new Set();
   const images = [
-    payload.pageMeta?.image ? { src: payload.pageMeta.image, alt: `${options.labelPrefix || "内容图片"} 1`, width: 0, height: 0 } : null,
+    options.includeMetaImage !== false && payload.pageMeta?.image
+      ? { src: payload.pageMeta.image, alt: `${options.labelPrefix || "内容图片"} 1`, width: 0, height: 0 }
+      : null,
     ...(payload.pageAssets?.images || [])
   ].filter(Boolean)
     .filter((image) => sourceType !== "twitter" || image.tweetScope === "primary");
@@ -603,7 +629,7 @@ function buildContentVideoCandidates(payload, sourceType, options = {}) {
         sourceType,
         mediaUrl: src,
         poster: video.poster || "",
-        selected: Boolean(options.selectedFirst && index === 0),
+        selected: Boolean(options.selectedFirst && seen.size === 1),
         label: video.label || `${options.labelPrefix || "内容视频"} ${index + 1}`,
         description: video.label || "",
         id: `content-video:${index + 1}:${safeShellName(src)}`,
@@ -626,9 +652,13 @@ function normalizeContentVideoUrl(url) {
   const text = String(url || "").trim();
   if (!text || text.startsWith("data:") || text.startsWith("blob:")) return "";
   try {
-    return new URL(text).toString();
+    const parsed = new URL(text);
+    if (!/^https?:$/.test(parsed.protocol)) return "";
+    const ext = path.extname(parsed.pathname).toLowerCase();
+    if (ext && ![".mp4", ".m4v", ".mov", ".webm", ".m3u8"].includes(ext)) return "";
+    return parsed.toString();
   } catch (_error) {
-    return text;
+    return "";
   }
 }
 
@@ -719,6 +749,14 @@ function contentTypeForImagePath(filePath) {
 async function importToEagle(importPlan, payload, metadata, folders, annotation) {
   if (importPlan.kind === "twitter-url") {
     const asset = await downloadTwitterMedia(payload.url, metadata, importPlan);
+    importPlan.asset = asset;
+    return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
+  }
+  if (importPlan.kind === "xiaohongshu-url") {
+    const video = await readXiaohongshuVideoInfo(payload.url);
+    const asset = await downloadMediaUrl(video.videoUrl, metadata, "xiaohongshu");
+    importPlan.mediaUrl = video.videoUrl;
+    importPlan.poster = video.poster;
     importPlan.asset = asset;
     return importPathToEagle(asset.filePath, payload, metadata, folders, annotation);
   }
@@ -955,7 +993,7 @@ function summarizeCandidates(candidates) {
     ...summarizeImportPlan(candidate),
     label: importPlanLabel(candidate),
     selected: Boolean(candidate.selected),
-    downloadable: ["media-file", "twitter-url", "screenshot", "html-snapshot"].includes(candidate.kind)
+    downloadable: ["media-file", "twitter-url", "xiaohongshu-url", "screenshot", "html-snapshot"].includes(candidate.kind)
   }));
 }
 
@@ -988,6 +1026,7 @@ function buildEaglePreviewFields(payload, metadata, folders, annotation, importP
 
 function importPlanLabel(importPlan) {
   if (importPlan.kind === "twitter-url") return "X/Twitter 视频";
+  if (importPlan.kind === "xiaohongshu-url") return "小红书视频";
   if (importPlan.kind === "media-file") return `媒体文件 ${importPlan.asset?.filename || ""}`.trim();
   if (importPlan.kind === "media-url" && importPlan.sourceType === "xiaohongshu") return `小红书视频 ${importPlan.mediaUrl || ""}`.trim();
   if (importPlan.kind === "media-url") return `页面视频 ${importPlan.mediaUrl || ""}`.trim();
@@ -1052,12 +1091,12 @@ async function resolveImportedItem(response, beforeIds, payload, importPlan, met
     if (exact) return exact;
   }
 
-  if (["media-file", "twitter-url", "media-url", "asset-url"].includes(importPlan.kind)) {
+  if (["media-file", "twitter-url", "xiaohongshu-url", "media-url", "asset-url"].includes(importPlan.kind)) {
     const media = await findExistingLocalAssetItem(payload, importPlan).catch(() => null);
     if (media) return media;
   }
 
-  if (importPlan.kind !== "media-file" && importPlan.kind !== "twitter-url") {
+  if (!["media-file", "twitter-url", "xiaohongshu-url"].includes(importPlan.kind)) {
     const newId = await findNewItemId(beforeIds);
     if (newId) return { id: newId };
   }
@@ -1132,7 +1171,7 @@ function isPlausibleImportedItem(item, payload, importPlan, metadata, folders = 
 }
 
 function isExpectedMediaItem(item, importPlan, payload) {
-  if (!item || !["media-file", "twitter-url", "media-url"].includes(importPlan?.kind)) return false;
+  if (!item || !["media-file", "twitter-url", "xiaohongshu-url", "media-url"].includes(importPlan?.kind)) return false;
   const itemText = JSON.stringify(item);
   const filename = importPlan.asset?.filename || "";
   const expectedSize = Number(importPlan.asset?.size || 0);
@@ -1143,7 +1182,7 @@ function isExpectedMediaItem(item, importPlan, payload) {
     || (filename && itemText.includes(filename))
     || (importPlan.mediaUrl && itemText.includes(importPlan.mediaUrl));
   const sizeOk = expectedSize > 0 && itemSize > 0 && Math.abs(itemSize - expectedSize) < Math.max(8192, expectedSize * 0.05);
-  return extOk && (sourceOk || sizeOk || importPlan.kind === "media-url" || importPlan.kind === "twitter-url");
+  return extOk && (sourceOk || sizeOk || ["media-url", "twitter-url", "xiaohongshu-url"].includes(importPlan.kind));
 }
 
 function isExpectedLocalAssetItem(item, importPlan, payload) {
@@ -1187,6 +1226,15 @@ function buildImportPreviewField(importPlan) {
       value: "确认收录时下载 X/Twitter 视频",
       kind: "remote-video",
       src: "",
+      poster: importPlan.poster || ""
+    };
+  }
+  if (importPlan.kind === "xiaohongshu-url") {
+    return {
+      label,
+      value: "确认收录时下载小红书视频",
+      kind: "remote-video",
+      src: importPlan.mediaUrl || "",
       poster: importPlan.poster || ""
     };
   }

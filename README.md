@@ -87,6 +87,10 @@ quoted posts and reply media, and ignore older preview requests after a new one
 starts. Video previews use the original media's thumbnail, not a crop of the
 visible page. Saving verifies the post and selected media ID again; ambiguous
 or mismatched videos stop with an error instead of substituting another item.
+Xiaohongshu video posts are scoped to the current note and use its structured
+video URL, cover, and duration. The collector skips recommendation-feed media,
+scripts, and icons, and refreshes the signed video URL again when saving so
+Eagle receives a real media file with a cover instead of a page asset.
 Eagle supports screenshot, top image, URL, and HTML snapshot modes. Eagle and
 Bear previews expose discovered media in a three-column grid with select-all,
 clear, and per-item multi-selection; confirmation processes the selected items
