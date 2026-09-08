@@ -127,6 +127,22 @@ test("generic websites expose captured videos and images through the same Bear m
   assert.equal(candidates[0].duration, 6.5);
 });
 
+test("Bear skips every media candidate when the preview is configured without images", async () => {
+  const candidates = await __testBuildBearCandidates({
+    url: "https://example.com/article",
+    title: "Article",
+    options: { bear: { noScreenshot: true } },
+    pageMeta: { image: "https://cdn.example/cover.jpg" },
+    pageAssets: {
+      videos: [{ src: "https://cdn.example/demo.mp4" }],
+      images: [{ src: "https://cdn.example/image.jpg", width: 1200, height: 900 }]
+    },
+    screenshotDataUrl: "data:image/jpeg;base64,ignored"
+  }, { titleZh: "文章" });
+
+  assert.deepEqual(candidates, []);
+});
+
 test("Bear lists every primary X image in the shared media grid", async () => {
   const candidates = await __testBuildBearCandidates({
     url: "https://x.com/angehyc/status/2072712904747729140",

@@ -57,7 +57,7 @@ async function init() {
     card.querySelector('[data-role="confirm"]').addEventListener("click", () => confirmChannel(card.dataset.target));
   }
   document.querySelector("#eagleCaptureMode").addEventListener("change", () => refreshIfOpen("eagle"));
-  document.querySelector("#bearScreenshotToggle").addEventListener("change", persistCurrentOptions);
+  document.querySelector("#bearScreenshotToggle").addEventListener("change", handleBearMediaToggleChange);
   await prepareOpenTargets().catch((error) => {
     setShellState("error");
     setStatus(`生成预览失败：${error.message}`);
@@ -297,9 +297,10 @@ function withTimeout(promise, ms, message) {
 
 async function buildPayload(target) {
   const isRichMedia = isRichMediaUrl(activeTab?.url || "");
-  const needsScreenshot = (target === "eagle" && (getEagleCaptureMode() === "screenshot" || isRichMedia)) || target === "bear";
+  const bearIncludesMedia = target === "bear" && getBearIncludeScreenshot();
+  const needsScreenshot = (target === "eagle" && (getEagleCaptureMode() === "screenshot" || isRichMedia)) || bearIncludesMedia;
   const needsFullContent = target !== "eagle" || getEagleCaptureMode() === "snapshot";
-  const needsDeepAssets = target === "eagle" || target === "bear" || isRichMedia;
+  const needsDeepAssets = target === "bear" ? bearIncludesMedia : target === "eagle" || isRichMedia;
   const [screenshotDataUrl, pageContext] = await Promise.all([
     needsScreenshot
       ? withTimeout(captureVisibleTabSafely(), 4000, "截图超时").catch(() => "")
@@ -327,7 +328,7 @@ async function buildPayload(target) {
         folderIds: []
       },
       bear: {
-        noScreenshot: false
+        noScreenshot: !getBearIncludeScreenshot()
       },
       obsidian: {
         tags: []
@@ -1282,7 +1283,9 @@ function setCardConfirmState(target) {
   const candidates = getCandidatesFromResult(currentTasks[target]?.results?.[target]);
   const selectedCount = getSelectedCandidateIds(target).length;
   const hasCandidates = candidates.length > 0;
-  button.disabled = isConfirming || isPreparing || !canConfirm || (hasCandidates && selectedCount === 0);
+  const bearIncludesMedia = target !== "bear" || getBearIncludeScreenshot();
+  const mediaSelectionRequired = hasCandidates && bearIncludesMedia;
+  button.disabled = isConfirming || isPreparing || !canConfirm || (mediaSelectionRequired && selectedCount === 0);
   button.classList.toggle("is-loading", isPreparing || isConfirming);
   button.setAttribute("aria-busy", String(isPreparing || isConfirming));
   if (isConfirming) {
@@ -1292,7 +1295,9 @@ function setCardConfirmState(target) {
   } else if ((target === "eagle" || target === "bear") && canConfirm) {
     button.textContent = target === "eagle"
       ? `保存已选 ${selectedCount} 项到 Eagle`
-      : `将 ${selectedCount} 个附件加入 Bear`;
+      : getBearIncludeScreenshot()
+        ? `将 ${selectedCount} 个附件加入 Bear`
+        : "保存文字到 Bear";
   } else if (status === "success") {
     button.textContent = "再次收录";
   } else if (status === "exists") {
@@ -1321,6 +1326,7 @@ function getEagleCandidateIds() {
 }
 
 function getBearCandidateIds() {
+  if (!getBearIncludeScreenshot()) return [];
   return getSelectedCandidateIds("bear");
 }
 
@@ -1333,6 +1339,10 @@ function getSelectedCandidateIds(target) {
 }
 
 function syncCandidatesFromResult(target, result) {
+  if (target === "bear" && !getBearIncludeScreenshot()) {
+    selectedBearCandidateIds = [];
+    return;
+  }
   const candidates = getCandidatesFromResult(result);
   if (!candidates.length) return;
   const validIds = new Set(candidates.map((candidate) => candidate.id));
@@ -1393,6 +1403,10 @@ function restoreCandidateGridFocus(panel, focusState) {
 
 function renderCandidateGrid(target, candidates, status = "") {
   const root = el("div", "candidate-grid-shell", "");
+  if (target === "bear" && !getBearIncludeScreenshot()) {
+    root.append(el("div", "candidate-grid-empty", "已关闭带配图，本次只写入文字和链接。"));
+    return root;
+  }
   const selectedCount = getSelectedCandidateIds(target).length;
   const head = el("div", "candidate-head", "");
   const count = el("span", "candidate-count", `已读取 ${candidates.length} 项 · 已选 ${selectedCount} 项`);
@@ -1583,6 +1597,24 @@ function persistCurrentOptions() {
   persistOptions(getOpenTargets()).catch((error) => {
     setStatus(`设置保存失败：${error.message}`);
   });
+}
+
+function handleBearMediaToggleChange() {
+  const result = currentTasks.bear?.results?.bear || {};
+  if (!getBearIncludeScreenshot()) {
+    selectedBearCandidateIds = [];
+  } else {
+    syncCandidatesFromResult("bear", result);
+  }
+  persistCurrentOptions();
+  renderTargetCandidates("bear", result);
+  setCardConfirmState("bear");
+
+  if (getBearIncludeScreenshot()
+    && getCard("bear").classList.contains("is-open")
+    && currentTasks.bear?.payload?.options?.bear?.noScreenshot === true) {
+    refreshIfOpen("bear");
+  }
 }
 
 function renderMediaGridCard(candidate, target = "eagle") {

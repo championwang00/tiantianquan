@@ -93,9 +93,12 @@ async function prepareTargetInBackground(message) {
 async function buildPayloadForBackground(target, tab, config) {
   const isRichMedia = isRichMediaUrl(tab.url || "");
   const eagleCaptureMode = config.eagleCaptureMode || "screenshot";
-  const needsScreenshot = (target === "eagle" && (eagleCaptureMode === "screenshot" || isRichMedia)) || target === "bear";
+  const bearIncludesMedia = target === "bear" && config.bearNoScreenshot !== true;
+  const needsScreenshot = (target === "eagle" && (eagleCaptureMode === "screenshot" || isRichMedia)) || bearIncludesMedia;
   const needsFullContent = target !== "eagle" || eagleCaptureMode === "snapshot";
-  const needsDeepAssets = target !== "eagle" || isRichMedia || eagleCaptureMode === "top-image";
+  const needsDeepAssets = target === "bear"
+    ? bearIncludesMedia
+    : target !== "eagle" || isRichMedia || eagleCaptureMode === "top-image";
   const [screenshotDataUrl, pageContext] = await Promise.all([
     needsScreenshot ? captureVisibleTabInBackground(tab.windowId) : Promise.resolve(""),
     collectPageContextInBackground(tab, { fullContent: needsFullContent, deepAssets: needsDeepAssets })

@@ -118,6 +118,10 @@ are stored beside the note under `assets/<note-name>/` and Markdown is rewritten
 to relative paths. An individual image download failure leaves its remote URL
 in place and does not prevent the note from being saved.
 
+Turning off Bear's **Include media** switch creates a text-only entry. The
+extension clears and hides media selection, sends no candidate IDs, and skips
+the screenshot and deep-media scan for that preview.
+
 Canonical source URLs remove common tracking parameters (`utm_*`, `ref`,
 `fbclid`, and `gclid`) before metadata and duplicate handling.
 

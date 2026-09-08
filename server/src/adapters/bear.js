@@ -203,6 +203,7 @@ async function buildDataUrlPreview(asset) {
 }
 
 async function buildBearCandidates(payload, metadata) {
+  if (payload.options?.bear?.noScreenshot === true) return [];
   const candidates = [];
   if (isInstagramUrl(payload.url) && payload.pageAssets?.carousel?.length) {
     candidates.push(...payload.pageAssets.carousel.map((asset, index) => makeCandidate({
