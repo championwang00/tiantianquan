@@ -101,6 +101,20 @@ test("localizes unique remote markdown images beside the note", async () => {
   assert.deepEqual(await fs.readFile(path.join(vaultPath, "Clippings/assets/Article/photo_1.jpg")), Buffer.from([4, 5]));
 });
 
+test("wraps localized image paths when the note name contains spaces", async () => {
+  const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-spaces-"));
+  const localized = await localizeMarkdownImages({
+    markdown: "![design](https://cdn.example/design.png)",
+    noteFilePath: path.join(vaultPath, "Clippings", "World Class Design.md"),
+    fetchImpl: async () => new Response(Buffer.from([1, 2, 3]), {
+      headers: { "content-type": "image/png" }
+    }),
+    resolveImpl: publicResolver
+  });
+
+  assert.equal(localized, "![design](<assets/World Class Design/design.png>)");
+});
+
 test("leaves a remote image URL unchanged when its download fails", async () => {
   const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "clip-router-obsidian-images-"));
   const markdown = "![broken](https://cdn.example/broken.png)";

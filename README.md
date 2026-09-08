@@ -122,6 +122,9 @@ Turning off Bear's **Include media** switch creates a text-only entry. The
 extension clears and hides media selection, sends no candidate IDs, and skips
 the screenshot and deep-media scan for that preview.
 
+Obsidian image downloads keep local Markdown destinations valid when generated
+note and asset folder names contain spaces, so article images render in-place.
+
 Canonical source URLs remove common tracking parameters (`utm_*`, `ref`,
 `fbclid`, and `gclid`) before metadata and duplicate handling.
 

@@ -432,10 +432,11 @@ function isPublicIp(address) {
 function replaceImageDestinations(markdown, replacements) {
   return markdown.replace(/(!\[[^\n]*?\]\()(<[^>]+>|(?:\\.|[^)])*(?:\((?:\\.|[^)])*\)(?:\\.|[^)])*)?)(\))/g, (match, prefix, destination, close) => {
     for (const [url, replacement] of replacements) {
-      if (destination === `<${url}>`) return `${prefix}${replacement}${close}`;
-      if (destination === url) return `${prefix}${replacement}${close}`;
-      if (destination?.startsWith(`${url} `)) return `${prefix}${replacement}${destination.slice(url.length)}${close}`;
-      if (destination?.startsWith(`<${url}> `)) return `${prefix}${replacement}${destination.slice(url.length + 2)}${close}`;
+      const localDestination = markdownDestination(replacement);
+      if (destination === `<${url}>`) return `${prefix}${localDestination}${close}`;
+      if (destination === url) return `${prefix}${localDestination}${close}`;
+      if (destination?.startsWith(`${url} `)) return `${prefix}${localDestination}${destination.slice(url.length)}${close}`;
+      if (destination?.startsWith(`<${url}> `)) return `${prefix}${localDestination}${destination.slice(url.length + 2)}${close}`;
     }
     return match;
   });
