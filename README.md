@@ -125,8 +125,9 @@ to relative paths. An individual image download failure leaves its remote URL
 in place and does not prevent the note from being saved.
 
 Turning off Bear's **Include media** switch creates a text-only entry. The
-extension clears and hides media selection, sends no candidate IDs, and skips
-the screenshot and deep-media scan for that preview.
+extension keeps discovered images visible and preserves selection, but sends no
+candidate IDs when writing text only. Media discovery is independent of this switch.
+When media is enabled, select at least one item before saving.
 
 Obsidian image downloads keep local Markdown destinations valid when generated
 note and asset folder names contain spaces, so article images render in-place.

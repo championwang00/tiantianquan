@@ -1702,3 +1702,31 @@ button,
   height: 100%;
   object-fit: cover;
 }
+
+/* One scrolling surface; layout changes must not trigger browser anchoring. */
+html {
+  overflow-y: auto;
+  overflow-anchor: none;
+  scroll-behavior: auto;
+}
+body {
+  max-height: none;
+  overflow: visible;
+}
+.shell {
+  align-content: start;
+  overflow-anchor: none;
+}
+.channel-body {
+  transition: none;
+}
+.selection-hint {
+  min-height: 34px;
+  color: var(--color-schemes-error);
+  font-size: var(--type-body-small-size);
+  line-height: var(--type-body-small-line-height);
+}
+.preview-image {
+  height: 190px;
+  object-fit: contain;
+}

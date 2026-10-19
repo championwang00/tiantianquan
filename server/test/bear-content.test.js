@@ -127,7 +127,7 @@ test("generic websites expose captured videos and images through the same Bear m
   assert.equal(candidates[0].duration, 6.5);
 });
 
-test("Bear skips every media candidate when the preview is configured without images", async () => {
+test("Bear still discovers media when writing is configured without images", async () => {
   const candidates = await __testBuildBearCandidates({
     url: "https://example.com/article",
     title: "Article",
@@ -137,10 +137,10 @@ test("Bear skips every media candidate when the preview is configured without im
       videos: [{ src: "https://cdn.example/demo.mp4" }],
       images: [{ src: "https://cdn.example/image.jpg", width: 1200, height: 900 }]
     },
-    screenshotDataUrl: "data:image/jpeg;base64,ignored"
+    screenshotDataUrl: ""
   }, { titleZh: "文章" });
 
-  assert.deepEqual(candidates, []);
+  assert.ok(candidates.some((item) => item.assetUrl === "https://cdn.example/image.jpg"));
 });
 
 test("Bear lists every primary X image in the shared media grid", async () => {
@@ -330,3 +330,12 @@ function bearTask(candidates) {
   const metadata = { summary: "Summary" };
   return { payload, results: { bear: { draft: "draft", draftNoScreenshot: "draft", metadata, writePlan: { metadata, candidates } } } };
 }
+
+test("media confirmation rejects an empty selection before writing anything", async () => {
+  const writes = [];
+  __setBearTestHooks({ append: async () => writes.push('append') });
+  await assert.rejects(confirmBearWrite(bearTask([candidate('one')]), {
+    candidateIds: [], includeScreenshot: true
+  }), /选择.*素材/);
+  assert.deepEqual(writes, []);
+});

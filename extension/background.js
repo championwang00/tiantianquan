@@ -93,7 +93,7 @@ async function prepareTargetInBackground(message) {
 async function buildPayloadForBackground(target, tab, config) {
   const isRichMedia = isRichMediaUrl(tab.url || "");
   const eagleCaptureMode = config.eagleCaptureMode || "screenshot";
-  const bearIncludesMedia = target === "bear" && config.bearNoScreenshot !== true;
+  const bearIncludesMedia = target === "bear";
   const needsScreenshot = (target === "eagle" && (eagleCaptureMode === "screenshot" || isRichMedia)) || bearIncludesMedia;
   const needsFullContent = target !== "eagle" || eagleCaptureMode === "snapshot";
   const needsDeepAssets = target === "bear"

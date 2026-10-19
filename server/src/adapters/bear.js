@@ -203,7 +203,6 @@ async function buildDataUrlPreview(asset) {
 }
 
 async function buildBearCandidates(payload, metadata) {
-  if (payload.options?.bear?.noScreenshot === true) return [];
   const candidates = [];
   if (isInstagramUrl(payload.url) && payload.pageAssets?.carousel?.length) {
     candidates.push(...payload.pageAssets.carousel.map((asset, index) => makeCandidate({
@@ -392,6 +391,9 @@ async function resolveSelectedBearAssets(task, options = {}) {
     : (hasExplicitSelection ? [] : candidates.slice(0, 1));
   if (!selected.length && selectedIds.size) {
     throw new Error("所选 Bear 素材已失效，请重新选择后再试。");
+  }
+  if (!selected.length) {
+    throw new Error("已开启带配图，请至少选择一项素材，或关闭带配图保存文字。");
   }
   const assets = [];
   const items = [];

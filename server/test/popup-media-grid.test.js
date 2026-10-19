@@ -45,18 +45,6 @@ test("selection controls and confirmation labels reflect candidate counts", () =
   assert.match(popupJs, /clear-selection/);
 });
 
-test("turning off Bear images clears selection and does not submit candidate ids", () => {
-  const bearCard = popupHtml.match(/<article class="channel-card" data-target="bear">([\s\S]*?)<\/article>/)?.[1] || "";
-  assert.match(bearCard, /<strong>带配图<\/strong>/);
-  assert.match(popupJs, /addEventListener\("change", handleBearMediaToggleChange\)/);
-  assert.match(popupJs, /const bearIncludesMedia = target === "bear" && getBearIncludeScreenshot\(\)/);
-  assert.match(popupJs, /if \(!getBearIncludeScreenshot\(\)\) return \[\];/);
-  assert.match(popupJs, /selectedBearCandidateIds = \[\]/);
-  assert.match(popupJs, /已关闭带配图，本次只写入文字和链接/);
-  assert.match(backgroundJs, /const bearIncludesMedia = target === "bear" && config\.bearNoScreenshot !== true/);
-  assert.match(backgroundJs, /target === "bear"\s*\? bearIncludesMedia\s*:/s);
-});
-
 test("grid rerenders preserve focus only for controls in the same target panel", () => {
   assert.match(popupJs, /function captureCandidateGridFocus\(panel, target\)/);
   assert.match(popupJs, /panel\.contains\(document\.activeElement\)/);
@@ -107,7 +95,7 @@ test("all website media grids show only media, with video corner badges and hove
 });
 
 test("Eagle and Bear scan generic page media beyond site-specific adapters", () => {
-  assert.match(popupJs, /target === "bear" \? bearIncludesMedia : target === "eagle" \|\| isRichMedia/);
+  assert.match(popupJs, /const needsDeepAssets = target === "bear" \|\| target === "eagle" \|\| isRichMedia/);
   assert.match(popupJs, /performance\.getEntriesByType\("resource"\)/);
   assert.match(popupJs, /user-attachments\\\/assets/);
   assert.match(popupJs, /source === "video-element"/);

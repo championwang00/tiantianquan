@@ -13,7 +13,7 @@ let eagleFolderMenuOpen = false;
 let eagleFolderMenuQuery = "";
 let lastScrollTop = 0;
 let restoringScroll = false;
-let trackedScroller = null;
+const candidateSelectionTasks = new Map();
 const SESSION_TASKS_KEY = "clipRouterActiveTasks";
 
 const CHANNELS = {
@@ -110,7 +110,7 @@ function toggleCard(target) {
   const open = !card.classList.contains("is-open");
   setCardOpen(target, open);
   updateConfirmState();
-  if (open) prepareTarget(target);
+  if (open && !currentTasks[target]) prepareTarget(target);
 }
 
 function setOnlyOpen(target) {
@@ -155,15 +155,17 @@ async function prepareOpenTargets() {
 
 async function prepareTarget(target) {
   if (!activeTab?.url) return;
-  setShellState("loading");
-  setCardStatus(target, "生成中");
-  setCardBusy(target, true);
-  setCardHasContent(target, false);
-  setCardLoading(target, target === "eagle" && isRichMediaUrl(activeTab.url)
-    ? "正在后台读取页面并识别视频，可能需要十几秒..."
-    : "正在后台读取页面并生成这个渠道的确认内容...");
-  setCardPreview(target, []);
-  setCardConfirmState(target);
+  withScrollPreserved(() => {
+    setShellState("loading");
+    setCardStatus(target, "生成中");
+    setCardBusy(target, true);
+    setCardHasContent(target, false);
+    setCardLoading(target, target === "eagle" && isRichMediaUrl(activeTab.url)
+      ? "正在后台读取页面并识别视频，可能需要十几秒..."
+      : "正在后台读取页面并生成这个渠道的确认内容...");
+    setCardPreview(target, []);
+    setCardConfirmState(target);
+  });
   try {
     await withTimeout(persistOptions(getOpenTargets()), 3000, "保存配置超时");
     const result = await withTimeout(
@@ -211,6 +213,10 @@ async function confirmChannel(target) {
   if (confirmingTargets.has(target)) return;
   const targetStatus = taskState?.results?.[target]?.status;
   if (!["needs_review", "success", "exists", "failed", "partial_success"].includes(targetStatus)) return;
+  if (target === "bear" && getBearIncludeScreenshot() && !getBearCandidateIds().length) {
+    setCardConfirmState(target);
+    return;
+  }
   clearSuccessReset(target);
 
   confirmingTargets.add(target);
@@ -297,10 +303,10 @@ function withTimeout(promise, ms, message) {
 
 async function buildPayload(target) {
   const isRichMedia = isRichMediaUrl(activeTab?.url || "");
-  const bearIncludesMedia = target === "bear" && getBearIncludeScreenshot();
+  const bearIncludesMedia = target === "bear";
   const needsScreenshot = (target === "eagle" && (getEagleCaptureMode() === "screenshot" || isRichMedia)) || bearIncludesMedia;
   const needsFullContent = target !== "eagle" || getEagleCaptureMode() === "snapshot";
-  const needsDeepAssets = target === "bear" ? bearIncludesMedia : target === "eagle" || isRichMedia;
+  const needsDeepAssets = target === "bear" || target === "eagle" || isRichMedia;
   const [screenshotDataUrl, pageContext] = await Promise.all([
     needsScreenshot
       ? withTimeout(captureVisibleTabSafely(), 4000, "截图超时").catch(() => "")
@@ -1074,27 +1080,29 @@ async function getStoredActiveTasks() {
 }
 
 function renderTaskForTarget(task, target) {
-  const result = task.results?.[target];
-  if (!result) return;
-  if (["queued", "running"].includes(result.status)) {
-    setCardBusy(target, true);
-    setCardHasContent(target, false);
-    setCardStatus(target, "生成中");
-    setCardLoading(target, "正在读取页面并生成这个渠道的确认内容...");
+  withScrollPreserved(() => {
+    const result = task.results?.[target];
+    if (!result) return;
+    if (["queued", "running"].includes(result.status)) {
+      setCardBusy(target, true);
+      setCardHasContent(target, false);
+      setCardStatus(target, "生成中");
+      setCardLoading(target, "正在读取页面并生成这个渠道的确认内容...");
+      setCardConfirmState(target);
+      return;
+    }
+    setCardBusy(target, false);
+    if (target === "eagle" || target === "bear") syncPartialSuccessSelection(target, result);
+    if (target === "eagle" || target === "bear") syncCandidatesFromResult(target, result);
+    if (target === "eagle" || target === "bear") renderTargetCandidates(target, result);
+    setCardPreview(target, result.previewFields || result.preview || result.draft || result.reason || "");
+    setCardHasContent(target, Boolean(result.previewFields || result.preview || result.draft));
+    setCardStatus(target, formatStatus(result));
+    setCardInlineState(target, formatResultReason(result));
+    if (target === "eagle") syncEagleFolderFromResult(result);
+    setShellState(result.status === "failed" ? "error" : "ready");
     setCardConfirmState(target);
-    return;
-  }
-  setCardBusy(target, false);
-  if (target === "eagle" || target === "bear") syncPartialSuccessSelection(target, result);
-  if (target === "eagle" || target === "bear") syncCandidatesFromResult(target, result);
-  if (target === "eagle" || target === "bear") renderTargetCandidates(target, result);
-  setCardPreview(target, result.previewFields || result.preview || result.draft || result.reason || "");
-  setCardHasContent(target, Boolean(result.previewFields || result.preview || result.draft));
-  setCardStatus(target, formatStatus(result));
-  setCardInlineState(target, formatResultReason(result));
-  if (target === "eagle") syncEagleFolderFromResult(result);
-  setShellState(result.status === "failed" ? "error" : "ready");
-  setCardConfirmState(target);
+  });
 }
 
 function formatStatus(result) {
@@ -1284,7 +1292,10 @@ function setCardConfirmState(target) {
   const selectedCount = getSelectedCandidateIds(target).length;
   const hasCandidates = candidates.length > 0;
   const bearIncludesMedia = target !== "bear" || getBearIncludeScreenshot();
-  const mediaSelectionRequired = hasCandidates && bearIncludesMedia;
+  const mediaSelectionRequired = target === "bear" ? bearIncludesMedia : hasCandidates;
+  const selectionHint = getCard(target).querySelector('[data-role="selection-hint"]');
+  if (selectionHint) selectionHint.textContent = canConfirm && bearIncludesMedia && selectedCount === 0
+    ? "已开启带配图，请至少选择一项素材，或关闭带配图保存文字。" : "";
   button.disabled = isConfirming || isPreparing || !canConfirm || (mediaSelectionRequired && selectedCount === 0);
   button.classList.toggle("is-loading", isPreparing || isConfirming);
   button.setAttribute("aria-busy", String(isPreparing || isConfirming));
@@ -1339,16 +1350,15 @@ function getSelectedCandidateIds(target) {
 }
 
 function syncCandidatesFromResult(target, result) {
-  if (target === "bear" && !getBearIncludeScreenshot()) {
-    selectedBearCandidateIds = [];
-    return;
-  }
   const candidates = getCandidatesFromResult(result);
   if (!candidates.length) return;
   const validIds = new Set(candidates.map((candidate) => candidate.id));
   const currentIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
   const nextIds = currentIds.filter((id) => validIds.has(id));
-  if (!nextIds.length && result.status !== "partial_success") {
+  const taskKey = currentTasks[target]?.id || result;
+  const firstRender = candidateSelectionTasks.get(target) !== taskKey;
+  candidateSelectionTasks.set(target, taskKey);
+  if (firstRender && !nextIds.length && result.status !== "partial_success") {
     nextIds.push(...candidates.filter((candidate) => candidate.selected).map((candidate) => candidate.id));
   }
   if (target === "bear") {
@@ -1378,7 +1388,22 @@ function renderTargetCandidates(target, result) {
   const focusState = captureCandidateGridFocus(panel, target);
   withScrollPreserved(() => {
     const candidates = getCandidatesFromResult(result);
-    panel.replaceChildren(renderCandidateGrid(target, candidates, result.status));
+    const signature = JSON.stringify([candidates, result.status]);
+    if (panel.dataset.signature !== signature) {
+      panel.replaceChildren(renderCandidateGrid(target, candidates, result.status));
+      panel.dataset.signature = signature;
+    } else {
+      const selected = new Set(getSelectedCandidateIds(target));
+      for (const button of panel.querySelectorAll("[data-candidate-id]")) {
+        const checked = selected.has(button.dataset.candidateId);
+        const candidate = candidates.find((item) => item.id === button.dataset.candidateId);
+        button.classList.toggle("is-selected", checked);
+        button.setAttribute("aria-pressed", String(checked));
+        button.setAttribute("aria-label", `${checked ? "取消选择" : "选择"}${candidateTitle(candidate)}`);
+      }
+      const count = panel.querySelector('[data-role="candidate-count"]');
+      if (count) count.textContent = `已读取 ${candidates.length} 项 · 已选 ${selected.size} 项`;
+    }
     restoreCandidateGridFocus(panel, focusState);
   });
 }
@@ -1403,10 +1428,6 @@ function restoreCandidateGridFocus(panel, focusState) {
 
 function renderCandidateGrid(target, candidates, status = "") {
   const root = el("div", "candidate-grid-shell", "");
-  if (target === "bear" && !getBearIncludeScreenshot()) {
-    root.append(el("div", "candidate-grid-empty", "已关闭带配图，本次只写入文字和链接。"));
-    return root;
-  }
   const selectedCount = getSelectedCandidateIds(target).length;
   const head = el("div", "candidate-head", "");
   const count = el("span", "candidate-count", `已读取 ${candidates.length} 项 · 已选 ${selectedCount} 项`);
@@ -1600,21 +1621,8 @@ function persistCurrentOptions() {
 }
 
 function handleBearMediaToggleChange() {
-  const result = currentTasks.bear?.results?.bear || {};
-  if (!getBearIncludeScreenshot()) {
-    selectedBearCandidateIds = [];
-  } else {
-    syncCandidatesFromResult("bear", result);
-  }
   persistCurrentOptions();
-  renderTargetCandidates("bear", result);
   setCardConfirmState("bear");
-
-  if (getBearIncludeScreenshot()
-    && getCard("bear").classList.contains("is-open")
-    && currentTasks.bear?.payload?.options?.bear?.noScreenshot === true) {
-    refreshIfOpen("bear");
-  }
 }
 
 function renderMediaGridCard(candidate, target = "eagle") {
@@ -1630,6 +1638,8 @@ function renderMediaGridCard(candidate, target = "eagle") {
   button.setAttribute("aria-label", `${checked ? "取消选择" : "选择"}${candidateTitle(candidate)}`);
   button.addEventListener("click", () => {
     rememberScroll();
+    const selectedIds = target === "bear" ? selectedBearCandidateIds : selectedEagleCandidateIds;
+    const checked = selectedIds.includes(candidate.id);
     if (!checked) {
       const nextIds = [...new Set([...selectedIds, candidate.id])];
       if (target === "bear") selectedBearCandidateIds = nextIds;
@@ -1790,7 +1800,6 @@ function setShellState(state) {
 }
 
 function trackScrollPosition() {
-  trackedScroller = getScrollContainer();
   lastScrollTop = getCurrentScrollTop();
   const update = () => {
     if (restoringScroll) return;
@@ -1813,7 +1822,12 @@ function rememberScroll() {
 }
 
 function withScrollPreserved(callback) {
-  const before = getCurrentScrollTop() || lastScrollTop || 0;
+  const before = getCurrentScrollTop();
+  // Keep enough document height for the current viewport even if a section
+  // collapses. Otherwise Chrome clamps scrollTop before it can be restored.
+  if (before > 0) {
+    elements.shell.style.minHeight = `${Math.max(parseFloat(elements.shell.style.minHeight) || 0, before + window.innerHeight)}px`;
+  }
   const result = callback();
   restoreScroll(before);
   return result;
@@ -1822,53 +1836,21 @@ function withScrollPreserved(callback) {
 function restoreScroll(value = lastScrollTop) {
   const top = Math.max(0, Number(value || 0));
   restoringScroll = true;
-  const apply = () => {
-    const scroller = getScrollContainer();
-    document.body.scrollTop = top;
-    document.documentElement.scrollTop = top;
-    if (scroller) scroller.scrollTop = top;
-    window.scrollTo(0, top);
-  };
-  apply();
-  requestAnimationFrame(() => {
-    apply();
-    requestAnimationFrame(() => {
-      apply();
-      lastScrollTop = top;
-      restoringScroll = false;
-    });
-  });
+  getScrollContainer().scrollTop = top;
+  lastScrollTop = top;
+  restoringScroll = false;
 }
 
 function getCurrentScrollTop() {
-  const scroller = getScrollContainer();
-  return scroller?.scrollTop || document.body.scrollTop || document.documentElement.scrollTop || window.scrollY || 0;
+  return getScrollContainer().scrollTop || 0;
 }
 
 function getScrollContainer() {
-  const candidates = getScrollableCandidates();
-  const active = candidates.find((node) => node.scrollTop > 0);
-  if (active) {
-    trackedScroller = active;
-    return active;
-  }
-  if (trackedScroller && canScroll(trackedScroller)) return trackedScroller;
-  const scrollable = candidates.find(canScroll);
-  trackedScroller = scrollable || document.scrollingElement || document.documentElement;
-  return trackedScroller;
+  return document.scrollingElement || document.documentElement;
 }
 
 function getScrollableCandidates() {
-  return [
-    document.body,
-    document.documentElement,
-    document.scrollingElement,
-    elements.shell
-  ].filter(Boolean);
-}
-
-function canScroll(node) {
-  return Number(node.scrollHeight || 0) > Number(node.clientHeight || 0) + 1;
+  return [getScrollContainer()];
 }
 
 function buildPreviewAssetUrl(filePath) {
