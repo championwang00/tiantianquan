@@ -186,10 +186,7 @@ async function prepareTarget(target) {
     setCardStatus(target, "失败");
     setCardInlineState(target, `生成失败：${error.message}`);
     setCardPreview(target, error.message);
-    if (currentTasks[target]?.results?.[target]) {
-      currentTasks[target].results[target].status = "failed";
-      currentTasks[target].results[target].reason = error.message;
-    }
+    currentTasks[target] = { target, results: { [target]: { status: "failed", reason: error.message } } };
     setCardConfirmState(target);
   } finally {
     updateConfirmState();
@@ -211,6 +208,12 @@ function refreshIfOpen(target) {
 async function confirmChannel(target) {
   const taskState = currentTasks[target];
   if (confirmingTargets.has(target)) return;
+  if (isPreviewFailure(taskState, target)) {
+    delete currentTasks[target];
+    await removeTaskState(target);
+    await prepareTarget(target);
+    return;
+  }
   const targetStatus = taskState?.results?.[target]?.status;
   if (!["needs_review", "success", "exists", "failed", "partial_success"].includes(targetStatus)) return;
   if (target === "bear" && getBearIncludeScreenshot() && !getBearCandidateIds().length) {
@@ -1007,7 +1010,8 @@ async function pollTaskLoop(taskId, target, attempt = 0, pollKey = "") {
     setShellState("error");
     setCardBusy(target, false);
     setCardStatus(target, "超时");
-    setCardInlineState(target, "生成超时。请确认本地服务和模型 provider 是否可用，然后重新展开。");
+    setCardInlineState(target, "生成超时。请确认本地服务和模型是否可用，然后重新抽取。");
+    currentTasks[target] = { target, results: { [target]: { status: "failed", reason: "生成超时" } } };
     setCardConfirmState(target);
     return;
   }
@@ -1041,6 +1045,7 @@ async function restoreActiveTasks() {
     };
     restored.push(target);
     pollTask(state.taskId, target).catch((error) => {
+      currentTasks[target] = { target, results: { [target]: { status: "failed", reason: error.message } } };
       setCardBusy(target, false);
       setCardStatus(target, "失败");
       setCardInlineState(target, `恢复失败：${error.message}`);
@@ -1281,10 +1286,16 @@ function setCardHasContent(target, hasContent) {
   getCard(target).classList.toggle("has-content", Boolean(hasContent));
 }
 
+function isPreviewFailure(task, target) {
+  const result = task?.results?.[target];
+  return result?.status === "failed" && !result.previewFields && !result.preview && !result.draft && !result.writePlan;
+}
+
 function setCardConfirmState(target) {
   const button = getCard(target).querySelector('[data-role="confirm"]');
   if (!button) return;
   const status = currentTasks[target]?.results?.[target]?.status || "";
+  const retryPreview = isPreviewFailure(currentTasks[target], target);
   const isConfirming = confirmingTargets.has(target);
   const isPreparing = status === "running" || status === "queued";
   const canConfirm = ["needs_review", "success", "exists", "failed", "partial_success"].includes(status);
@@ -1294,15 +1305,17 @@ function setCardConfirmState(target) {
   const bearIncludesMedia = target !== "bear" || getBearIncludeScreenshot();
   const mediaSelectionRequired = target === "bear" ? bearIncludesMedia : hasCandidates;
   const selectionHint = getCard(target).querySelector('[data-role="selection-hint"]');
-  if (selectionHint) selectionHint.textContent = canConfirm && bearIncludesMedia && selectedCount === 0
+  if (selectionHint) selectionHint.textContent = !retryPreview && canConfirm && bearIncludesMedia && selectedCount === 0
     ? "已开启带配图，请至少选择一项素材，或关闭带配图保存文字。" : "";
-  button.disabled = isConfirming || isPreparing || !canConfirm || (mediaSelectionRequired && selectedCount === 0);
+  button.disabled = isConfirming || isPreparing || !canConfirm || (!retryPreview && mediaSelectionRequired && selectedCount === 0);
   button.classList.toggle("is-loading", isPreparing || isConfirming);
   button.setAttribute("aria-busy", String(isPreparing || isConfirming));
   if (isConfirming) {
     button.textContent = "正在收录...";
   } else if (isPreparing) {
     button.textContent = "正在生成...";
+  } else if (retryPreview) {
+    button.textContent = "重新抽取";
   } else if ((target === "eagle" || target === "bear") && canConfirm) {
     button.textContent = target === "eagle"
       ? `保存已选 ${selectedCount} 项到 Eagle`

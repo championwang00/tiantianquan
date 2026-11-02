@@ -98,3 +98,26 @@ test('reopening a prepared channel keeps its preview and selections instead of s
     prepareTarget = () => { throw Error('prepared channel should not be regenerated'); };`);
   assert.doesNotThrow(() => run('toggleCard("bear")'));
 });
+
+test('failed preview offers a fresh extraction instead of retrying the write', async () => {
+  const { document, run } = popup();
+  run(`currentTasks.eagle = {id:'failed',results:{eagle:{status:'failed',reason:'provider error'}}};
+    removeTaskState = async (target) => { globalThis.removedTarget = target; };
+    prepareTarget = async (target) => { globalThis.retriedTarget = target; };
+    setCardConfirmState('eagle');`);
+  const button = document.querySelector('[data-target="eagle"] [data-role="confirm"]');
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, '重新抽取');
+  await run('confirmChannel("eagle")');
+  assert.equal(run('globalThis.removedTarget'), 'eagle');
+  assert.equal(run('globalThis.retriedTarget'), 'eagle');
+});
+
+test('failed write keeps its existing preview and write retry', () => {
+  const { document, run } = popup();
+  run(`currentTasks.eagle = {id:'task1',results:{eagle:{status:'failed',preview:'preview',candidates:[{id:'one',selected:true}]}}};
+    syncCandidatesFromResult('eagle', currentTasks.eagle.results.eagle); setCardConfirmState('eagle');`);
+  const button = document.querySelector('[data-target="eagle"] [data-role="confirm"]');
+  assert.equal(button.disabled, false);
+  assert.match(button.textContent, /保存已选/);
+});
