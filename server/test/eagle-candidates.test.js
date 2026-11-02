@@ -746,3 +746,31 @@ test("carousel restoration caps both directions at 30 when signatures keep chang
   assert.equal(fallbackNextClicks, 30);
   assert.notEqual(current, "initial");
 });
+
+test('X article includes and selects all embedded article images in screenshot mode', async () => {
+  const result = await __testHooks.buildImportCandidates({
+    url: 'https://x.com/author/status/123', title: 'X 帖子',
+    options: {eagle:{captureMode:'screenshot'}}, pageMeta:{}, pageCapture:{url:'https://x.com/author/status/123'},
+    pageAssets:{images:[],videos:[],videoRects:[]},
+    pageContent:{text:'', markdown:'## Article\n\n![one](https://pbs.twimg.com/media/one?format=jpg&name=900x900)\n\n![two](https://pbs.twimg.com/media/two?format=jpg&name=900x900)'},
+    screenshotDataUrl:'data:image/png;base64,aGVsbG8='
+  }, {titleZh:'文章',oneLine:'说明',tags:[]});
+  assert.equal(result.filter(c => c.kind === 'asset-url' && c.selected).length, 2);
+});
+
+test('a cleaned screenshot can be recreated for a later save', async () => {
+  const candidate = {kind:'screenshot',asset:{filePath:'/tmp/clip-router-missing-test.png'}};
+  await __testHooks.restoreOwnedAsset(candidate, {screenshotDataUrl:'data:image/png;base64,aGVsbG8='}, {titleZh:'test'});
+  assert.equal(await fs.promises.readFile(candidate.asset.filePath, 'utf8'), 'hello');
+  await fs.promises.unlink(candidate.asset.filePath);
+});
+
+test('recognizes a previously imported identical screenshot without matching other assets', () => {
+  const payload = {url:'https://x.com/example/status/123'};
+  const plan = {kind:'screenshot',asset:{size:439093}};
+  const metadata = {titleZh:'标题',oneLine:'描述'};
+  const item = {url:payload.url,name:'标题 — 描述',size:439093,ext:'png'};
+  assert.equal(__testHooks.isMatchingScreenshot(item, payload, plan, metadata), true);
+  assert.equal(__testHooks.isMatchingScreenshot({...item,size:439094}, payload, plan, metadata), false);
+  assert.equal(__testHooks.isMatchingScreenshot({...item,url:'https://other.example'}, payload, plan, metadata), false);
+});

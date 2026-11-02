@@ -308,7 +308,7 @@ async function buildPayload(target) {
   const isRichMedia = isRichMediaUrl(activeTab?.url || "");
   const bearIncludesMedia = target === "bear";
   const needsScreenshot = (target === "eagle" && (getEagleCaptureMode() === "screenshot" || isRichMedia)) || bearIncludesMedia;
-  const needsFullContent = target !== "eagle" || getEagleCaptureMode() === "snapshot";
+  const needsFullContent = target !== "eagle" || getEagleCaptureMode() === "snapshot" || isXPostUrl(activeTab.url);
   const needsDeepAssets = target === "bear" || target === "eagle" || isRichMedia;
   const [screenshotDataUrl, pageContext] = await Promise.all([
     needsScreenshot
@@ -350,6 +350,15 @@ async function buildPayload(target) {
     screenshotDataUrl,
     capturedAt: new Date().toISOString()
   };
+}
+
+function isXPostUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)(x|twitter)\.com$/i.test(parsed.hostname) && /\/status\/\d+/.test(parsed.pathname);
+  } catch (_error) {
+    return false;
+  }
 }
 
 async function collectPageContext(tab, options = {}) {

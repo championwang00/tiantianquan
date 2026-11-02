@@ -12,7 +12,7 @@ function popup() {
   document.scrollingElement = document.documentElement;
   document.documentElement.scrollTop = 0;
   document.body.scrollTop = 0;
-  const context = vm.createContext({ document, console, Set, Map, confirmObsidian: () => {}, requestAnimationFrame: (fn) => frames.push(fn), window: { innerHeight: 600, scrollY: 0, scrollTo(_x, y) { document.documentElement.scrollTop = y; } } });
+  const context = vm.createContext({ document, console, Set, Map, URL, confirmObsidian: () => {}, requestAnimationFrame: (fn) => frames.push(fn), window: { innerHeight: 600, scrollY: 0, scrollTo(_x, y) { document.documentElement.scrollTop = y; } } });
   vm.runInContext(source, context);
   return { document, frames, run: (js) => vm.runInContext(js, context) };
 }
@@ -120,4 +120,16 @@ test('failed write keeps its existing preview and write retry', () => {
   const button = document.querySelector('[data-target="eagle"] [data-role="confirm"]');
   assert.equal(button.disabled, false);
   assert.match(button.textContent, /保存已选/);
+});
+
+test('Eagle screenshot mode captures X article content for its title and summary', async () => {
+  const { run } = popup();
+  run(`activeTab = {id:1,url:'https://x.com/elvar_official/status/2116174609355571402',title:'X'};
+    getEagleCaptureMode = () => 'screenshot';
+    withTimeout = (promise) => promise;
+    captureVisibleTabSafely = async () => 'data:image/jpeg;base64,preview';
+    collectPageContext = async (_tab, options) => ({capture:{title:'X'},meta:{},content:{fullContent:options.fullContent},assets:{}});
+    verifyPageCapture = async () => {};`);
+  const payload = await run('buildPayload("eagle")');
+  assert.equal(payload.pageContent.fullContent, true);
 });

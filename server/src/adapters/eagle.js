@@ -264,6 +264,8 @@ export const __testHooks = {
   importWithFallback,
   executeCandidateBatch,
   normalizeSelectedCandidates,
+  restoreOwnedAsset,
+  isMatchingScreenshot,
   parseMacProxy,
   selectDefaultCandidates,
   summarizeCandidates
@@ -349,6 +351,8 @@ async function buildImportPlan(payload, metadata) {
 
 async function buildImportCandidates(payload, metadata, dependencies = {}) {
   const sourceType = detectSourceType(payload.url);
+  const articleMarkdown = String(payload.pageContent?.markdown || "");
+  const isXArticle = sourceType === "twitter" && !payload.pageContent?.text?.trim() && /^#{1,3}\s+/m.test(articleMarkdown);
   const captureMode = payload.options?.eagle?.captureMode || "screenshot";
   const candidates = [];
   const readXiaohongshuVideo = dependencies.readXiaohongshuVideoInfo || readXiaohongshuVideoInfo;
@@ -431,8 +435,11 @@ async function buildImportCandidates(payload, metadata, dependencies = {}) {
     const videoCandidates = sourceType === "twitter" && candidates.some((candidate) => candidate.kind === "twitter-url")
       ? [] : await buildContentVideoCandidates(payload, sourceType, { selectedFirst: true, labelPrefix: "内容视频" });
     candidates.push(...videoCandidates);
-    const imageCandidates = buildContentImageCandidates(payload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片" });
-    candidates.push(...imageCandidates.slice(0, 6));
+    const articleImages = isXArticle ? [...articleMarkdown.matchAll(/!\[[^\]]*\]\((https:\/\/pbs\.twimg\.com\/(?:media|amplify_video_thumb|tweet_video_thumb)\/[^\s)]+)\)/g)]
+      .map((match) => ({ src: match[1], tweetScope: "primary" })) : [];
+    const imagePayload = articleImages.length ? { ...payload, pageAssets: { ...payload.pageAssets, images: articleImages } } : payload;
+    const imageCandidates = buildContentImageCandidates(imagePayload, sourceType, { selectedFirst: captureMode === "top-image", labelPrefix: "内容图片", limit: isXArticle ? 30 : 8 });
+    candidates.push(...(isXArticle ? imageCandidates : imageCandidates.slice(0, 6)));
   }
 
   if (payload.screenshotDataUrl) {
@@ -457,6 +464,9 @@ async function buildImportCandidates(payload, metadata, dependencies = {}) {
   }
 
   candidates.push(makeCandidate({ kind: "url", sourceType, selected: captureMode === "url" && !hasSelectedCandidate(candidates) }));
+  if (isXArticle && candidates.some((candidate) => candidate.kind === "asset-url")) {
+    return candidates.map((candidate) => ({ ...candidate, selected: candidate.kind === "asset-url" }));
+  }
   return selectDefaultCandidates(candidates, captureMode);
 }
 
@@ -614,7 +624,7 @@ function buildContentImageCandidates(payload, sourceType, options = {}) {
       });
     })
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, options.limit || 8);
 }
 
 function buildContentVideoCandidates(payload, sourceType, options = {}) {
@@ -778,9 +788,20 @@ async function importToEagle(importPlan, payload, metadata, folders, annotation)
     return importAssetUrlToEagle(importPlan.assetUrl, payload, metadata, folders, annotation);
   }
   if (importPlan.kind === "media-file" || importPlan.kind === "screenshot" || importPlan.kind === "html-snapshot") {
+    await restoreOwnedAsset(importPlan, payload, metadata);
     return importPathToEagle(importPlan.asset.filePath, payload, metadata, folders, annotation);
   }
   return importUrlToEagle(payload, metadata, folders, annotation);
+}
+
+async function restoreOwnedAsset(candidate, payload, metadata) {
+  if (await fileSize(candidate.asset?.filePath)) return;
+  if (candidate.kind === "screenshot" && payload.screenshotDataUrl) {
+    candidate.asset = await saveDataUrlAsset(payload.screenshotDataUrl, metadata.titleZh || payload.title || "eagle-screenshot", "png");
+  } else if (candidate.kind === "html-snapshot" && payload.pageContent?.htmlSnapshot) {
+    candidate.asset = await saveHtmlSnapshot(payload.pageContent.htmlSnapshot, metadata.titleZh || payload.title || "eagle-page");
+  }
+  if (!candidate.asset?.filePath || !(await fileSize(candidate.asset.filePath))) throw new Error("素材文件已失效，请重新抽取后再保存。");
 }
 
 async function downloadInstagramCarouselVideo(postUrl, candidate, metadata) {
@@ -1092,6 +1113,12 @@ async function resolveImportedItem(response, beforeIds, payload, importPlan, met
     if (exact) return exact;
   }
 
+  if (importPlan.kind === "screenshot") {
+    const items = await listItems(5000).catch(() => []);
+    const existing = items.find((item) => isMatchingScreenshot(item, payload, importPlan, metadata));
+    if (existing) return existing;
+  }
+
   if (["media-file", "twitter-url", "xiaohongshu-url", "media-url", "asset-url"].includes(importPlan.kind)) {
     const media = await findExistingLocalAssetItem(payload, importPlan).catch(() => null);
     if (media) return media;
@@ -1103,6 +1130,14 @@ async function resolveImportedItem(response, beforeIds, payload, importPlan, met
   }
 
   return null;
+}
+
+function isMatchingScreenshot(item, payload, importPlan, metadata) {
+  const expectedSize = Number(importPlan.asset?.size || 0);
+  return importPlan.kind === "screenshot" && expectedSize > 0
+    && Number(item.size) === expectedSize && item.name === buildName(payload, metadata)
+    && (item.url === payload.url || item.website === payload.url)
+    && ["png", "jpg", "jpeg", "webp"].includes(String(item.ext || "").toLowerCase());
 }
 
 function extractResponseItemId(response) {

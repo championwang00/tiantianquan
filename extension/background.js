@@ -90,12 +90,21 @@ async function prepareTargetInBackground(message) {
   return { taskId: result.taskId, target };
 }
 
+function isXPostUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)(x|twitter)\.com$/i.test(parsed.hostname) && /\/status\/\d+/.test(parsed.pathname);
+  } catch (_error) {
+    return false;
+  }
+}
+
 async function buildPayloadForBackground(target, tab, config) {
   const isRichMedia = isRichMediaUrl(tab.url || "");
   const eagleCaptureMode = config.eagleCaptureMode || "screenshot";
   const bearIncludesMedia = target === "bear";
   const needsScreenshot = (target === "eagle" && (eagleCaptureMode === "screenshot" || isRichMedia)) || bearIncludesMedia;
-  const needsFullContent = target !== "eagle" || eagleCaptureMode === "snapshot";
+  const needsFullContent = target !== "eagle" || eagleCaptureMode === "snapshot" || isXPostUrl(tab.url);
   const needsDeepAssets = target === "bear"
     ? bearIncludesMedia
     : target !== "eagle" || isRichMedia || eagleCaptureMode === "top-image";
