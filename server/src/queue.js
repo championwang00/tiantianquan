@@ -81,6 +81,7 @@ export async function confirmTaskEagle(id, options = {}) {
 export async function confirmTaskTarget(id, target, writer) {
   const task = await getTask(id);
   if (!task) return null;
+  if (task.results[target]?.status === "unverified") return task;
   task.results[target] = { ...task.results[target], status: "running" };
   updateTask(task, { status: deriveStatus(task.results) });
   await appendTaskRecord(task);
@@ -110,6 +111,7 @@ function deriveStatus(results) {
   if (statuses.some((status) => status === "running" || status === "queued")) return "running";
   if (statuses.every((status) => status === "success" || status === "exists")) return "success";
   if (statuses.some((status) => status === "needs_review")) return "needs_review";
+  if (statuses.some((status) => status === "unverified")) return "unverified";
   if (statuses.some((status) => status === "success" || status === "exists" || status === "needs_review")) {
     return "partial_success";
   }

@@ -232,8 +232,11 @@ async function confirmChannel(target) {
     currentTasks[target] = { ...task, target };
     await persistTaskState(target, currentTasks[target]);
     renderTaskForTarget(task, target);
-    if (task.results?.[target]?.status !== "partial_success") scheduleSuccessReset(target);
-    setStatus(task.results?.[target]?.status === "partial_success"
+    const resultStatus = task.results?.[target]?.status;
+    if (["success", "exists"].includes(resultStatus)) scheduleSuccessReset(target);
+    setStatus(resultStatus === "unverified" || resultStatus === "failed"
+      ? task.results[target].reason
+      : resultStatus === "partial_success"
       ? `${CHANNELS[target].label} 部分写入，请重试失败项。`
       : `${CHANNELS[target].label} 写入完成。对应软件已尝试唤起。`);
   } catch (error) {
@@ -1120,6 +1123,7 @@ function renderTaskForTarget(task, target) {
 }
 
 function formatStatus(result) {
+  if (result.status === "unverified") return "待核实";
   if (result.status === "needs_review") return "待确认";
   if (result.status === "success") return "已写入";
   if (result.status === "exists") return "已写入";
@@ -1325,6 +1329,8 @@ function setCardConfirmState(target) {
     button.textContent = "正在生成...";
   } else if (retryPreview) {
     button.textContent = "重新抽取";
+  } else if (status === "unverified") {
+    button.textContent = "请到 Bear 核实";
   } else if ((target === "eagle" || target === "bear") && canConfirm) {
     button.textContent = target === "eagle"
       ? `保存已选 ${selectedCount} 项到 Eagle`

@@ -67,6 +67,7 @@ export async function runBearAdapter(payload) {
 }
 
 export async function confirmBearWrite(task, options = {}) {
+  if (task.results?.bear?.status === "unverified") return task.results.bear;
   const normalized = typeof options === "string" ? { draft: options, includeScreenshot: true } : options;
   return withTimeout(confirmBearWriteInner(task, normalized), 25000, "Bear confirm timed out");
 }
@@ -100,11 +101,24 @@ async function confirmBearWriteInner(task, options) {
   }
   await bearDependencies.wait(1800);
   const successfulAssets = resolution.items.filter((item) => item.status === "success").map((item) => item.asset);
-  const verification = await bearDependencies.verify(task.payload.url, includeScreenshot ? successfulAssets.map((asset) => asset.filename) : []);
+  const verification = await bearDependencies.verify(task.payload.url, includeScreenshot ? successfulAssets.map((asset) => asset.filename) : [])
+    .catch((error) => ({ count: -1, status: "unverified", code: error.code || "", reason: error.message }));
   const mediaOk = !includeScreenshot || !successfulAssets.length || verification.imageRefCount >= successfulAssets.length;
   const itemResults = resolution.items.map(({ asset: _asset, ...item }) => item);
   const succeeded = itemResults.filter((item) => item.status === "success").length;
   const failed = itemResults.filter((item) => item.status === "failed").length;
+  if (verification.status === "unverified" || verification.count < 0) {
+    return {
+      ...result,
+      status: "unverified",
+      reason: `已向 Bear 发送内容，但无法读取数据库核实结果。请到 Bear 核实，避免重复收录。${failed ? `另有 ${failed} 个附件发送失败。` : ""}`,
+      dispatchedAt: new Date().toISOString(),
+      verification,
+      succeeded,
+      failed,
+      items: itemResults
+    };
+  }
   if (verification.count < 1 || !mediaOk) {
     return {
       ...result,

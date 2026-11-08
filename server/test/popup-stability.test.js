@@ -133,3 +133,15 @@ test('Eagle screenshot mode captures X article content for its title and summary
   const payload = await run('buildPayload("eagle")');
   assert.equal(payload.pageContent.fullContent, true);
 });
+
+test('unverified Bear submissions ask for checking Bear and cannot be written again', async () => {
+  const { document, run } = popup();
+  run(`currentTasks.bear = {id:'task1',results:{bear:{status:'unverified',reason:'请到 Bear 核实',draft:'Saved draft',candidates:[]}}};
+    renderTaskForTarget(currentTasks.bear,'bear');
+    CHANNELS.bear.confirm = () => {throw Error('must not repeat the write')};`);
+  const button = document.querySelector('[data-target="bear"] [data-role="confirm"]');
+  assert.equal(button.disabled, true);
+  assert.match(button.textContent, /Bear.*核实/);
+  assert.equal(run("formatStatus({status:'unverified'})"), '待核实');
+  await run("confirmChannel('bear')");
+});

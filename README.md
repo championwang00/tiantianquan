@@ -132,6 +132,11 @@ When media is enabled, select at least one item before saving.
 Obsidian image downloads keep local Markdown destinations valid when generated
 note and asset folder names contain spaces, so article images render in-place.
 
+If Bear's database cannot be read after dispatching a clip (for example, macOS
+denies the background service access), the result is **待核实** instead of a
+write failure or verified success. Check the target Bear note before saving
+again; the same task cannot be resubmitted while verification is unavailable.
+
 Canonical source URLs remove common tracking parameters (`utm_*`, `ref`,
 `fbclid`, and `gclid`) before metadata and duplicate handling.
 

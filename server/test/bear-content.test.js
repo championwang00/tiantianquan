@@ -339,3 +339,34 @@ test("media confirmation rejects an empty selection before writing anything", as
   }), /选择.*素材/);
   assert.deepEqual(writes, []);
 });
+
+for (const [label, verify] of [
+  ["permission denied", async () => { throw Object.assign(new Error("database access denied"), { code: "EPERM" }); }],
+  ["database missing", async () => ({ count: -1, status: "unverified", reason: "database unavailable" })]
+]) {
+  test(`keeps dispatched Bear content unverified when verification is unavailable: ${label}`, async () => {
+    const writes = [];
+    const removed = [];
+    __setBearTestHooks({
+      resolveCandidate: async () => ({ filePath: '/tmp/preview.gif', filename: 'preview.gif', cleanupPaths: ['/tmp/preview.gif'] }),
+      append: async () => writes.push('text'), addFile: async () => writes.push('file'), wait: async () => {},
+      verify, cleanup: async (paths) => removed.push(...paths)
+    });
+    const task = bearTask([candidate('video')]);
+    const result = await confirmBearWrite(task, { candidateIds: ['video'] });
+    assert.equal(result.status, 'unverified');
+    assert.equal(result.verification.status, 'unverified');
+    assert.equal(result.items[0].status, 'success');
+    assert.match(result.reason, /Bear.*核实/);
+    assert.deepEqual(removed, ['/tmp/preview.gif']);
+    task.results.bear = result;
+    await confirmBearWrite(task, { candidateIds: ['video'] });
+    assert.deepEqual(writes, ['text', 'file']);
+  });
+}
+
+test('a readable Bear database that lacks the saved URL still reports a write failure', async () => {
+  __setBearTestHooks({append: async () => {}, wait: async () => {}, verify: async () => ({count: 0, imageRefCount: 0})});
+  const result = await confirmBearWrite(bearTask([]), {includeScreenshot: false});
+  assert.equal(result.status, 'failed');
+});
