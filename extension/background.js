@@ -182,7 +182,8 @@ async function collectPageContextInBackground(tab, options = {}) {
             ? xiaohongshuRoot?.cloneNode(true) || document.createElement("div")
             : findReadableRoot(weChatRoot);
         if (isTweet) for (const quote of article.querySelectorAll('[data-testid="quoteTweet"], div[role="link"]')) quote.remove();
-        const structuredArticle = isTweet || isXiaohongshuPost ? article : weChatRoot || findArticleRoot();
+        // Keep HTML, markdown, and visible text scoped to the same readable root.
+        const structuredArticle = article;
         const visibleText = isTweet
           ? getVisibleText(article.querySelector('[data-testid="tweetText"]'))
           : getVisibleText(article);
@@ -237,31 +238,6 @@ async function collectPageContextInBackground(tab, options = {}) {
           return candidates
             .map((node) => ({ node, score: readableScore(node) }))
             .sort((a, b) => b.score - a.score)[0]?.node || document.body;
-        }
-
-        function findArticleRoot() {
-          const preferred = findWeChatArticleRoot()
-            || document.querySelector("article")
-            || document.querySelector("[role='main'] article")
-            || document.querySelector("main");
-          if (preferred) return preferred;
-          let bestNode = null;
-          let bestScore = -1;
-          const candidates = document.querySelectorAll("section, div");
-          const limit = Math.min(candidates.length, 500);
-          for (let index = 0; index < limit; index += 1) {
-            const node = candidates[index];
-            const textLength = (node.innerText || "").trim().length;
-            if (textLength < 200) continue;
-            const score = textLength
-              + node.querySelectorAll("p, li, blockquote, pre, h1, h2, h3").length * 180
-              + node.querySelectorAll("img").length * 80;
-            if (score > bestScore) {
-              bestNode = node;
-              bestScore = score;
-            }
-          }
-          return bestNode || document.body;
         }
 
         function findWeChatArticleRoot() {

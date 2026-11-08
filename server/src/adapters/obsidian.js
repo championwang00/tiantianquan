@@ -442,8 +442,8 @@ function replaceImageDestinations(markdown, replacements) {
   });
 }
 
-function buildObsidianPreviewFields(payload, metadata, writePlan) {
-  const body = getPreferredOriginalText(payload);
+export function buildObsidianPreviewFields(payload, metadata, writePlan) {
+  const body = writePlan.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)?/, "").trim();
   return [
     { label: "title", value: metadata.titleZh, kind: "text" },
     { label: "source", value: payload.url, kind: "url" },

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   buildObsidianOpenUrl,
   buildWritePlan,
+  buildObsidianPreviewFields,
   confirmObsidianWrite,
   enableObsidianFileExplorerAutoReveal,
   localizeMarkdownImages,
@@ -488,4 +489,20 @@ test("confirm repairs an existing clip that was created before media was embedde
   assert.equal(result.status, "success");
   assert.match(repaired, /## 配图/);
   assert.match(repaired, /!\[配图 1\]\(http:\/\/localhost\/image\.png\)/);
+});
+
+
+test("Obsidian body preview uses the full planned body, including images and notes", () => {
+  const payload = { url: "https://example.com/post", capturedAt: "2026-11-08T00:00:00Z",
+    pageContent: { text: "A different plain-text extraction", articleHtml: "<main><h1>Actual article</h1><p>" + "Long body. ".repeat(600) + "</p></main>" },
+    pageAssets: { images: [{src: "https://example.com/figure.png"}] }, userNote: "My own note" };
+  const metadata = { canonicalName: "Article", titleZh: "Article", author: { values: [] }, summary: "Summary", tags: [] };
+  const plan = buildWritePlan(payload, {vaultPath: "/vault", clipFolder: "Clippings"}, metadata);
+  const body = buildObsidianPreviewFields(payload, metadata, plan).find(field => field.label === "正文").value;
+  assert.equal(body, plan.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)?/, "").trim());
+  assert.match(body, /Actual article/);
+  assert.match(body, /figure.png/);
+  assert.match(body, /My own note/);
+  assert.ok(body.length > 4000);
+  assert.doesNotMatch(body, /different plain-text/);
 });
